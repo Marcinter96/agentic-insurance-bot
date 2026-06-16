@@ -39,11 +39,20 @@ logger = logging.getLogger(__name__)
 
 from google import genai
 
-_genai_client = genai.Client(
-    vertexai=USE_VERTEX_AI,
-    project=GCP_PROJECT if USE_VERTEX_AI else None,
-    location=GCP_LOCATION if USE_VERTEX_AI else None,
-)
+# Lazy singleton: do NOT build the client at import time (that would require
+# credentials / an API key just to import the module, which ADK does at startup).
+_genai_client = None
+
+
+def _get_genai_client():
+    global _genai_client
+    if _genai_client is None:
+        _genai_client = genai.Client(
+            vertexai=USE_VERTEX_AI,
+            project=GCP_PROJECT if USE_VERTEX_AI else None,
+            location=GCP_LOCATION if USE_VERTEX_AI else None,
+        )
+    return _genai_client
 
 _CLASSIFIER_PROMPT = """\
 You are an insurance call-centre classifier. Extract structured information from the customer's message.
@@ -84,7 +93,7 @@ def intent_classifier(ctx: Context, node_input: str) -> None:
     user_message = node_input if isinstance(node_input, str) else str(node_input)
 
     try:
-        response = _genai_client.models.generate_content(
+        response = _get_genai_client().models.generate_content(
             model=LLM_MODEL,
             contents=_CLASSIFIER_PROMPT.format(message=user_message),
             config={"response_mime_type": "application/json"},
@@ -139,6 +148,7 @@ def verification_node(ctx: Context) -> None:
         }
         return
 
+    # Secondary check: birthdate cross-validation
     stored_birthdate = customer.get("birthdate")
     birthdate_match = (birthdate is None) or (stored_birthdate == birthdate)
 
@@ -396,18 +406,31 @@ root_agent = Workflow(
         "risk assessment, and specialist agents with audit logging."
     ),
     edges=[
+        # Stage 1: START → intent classifier
         (START, intent_classifier),
+
+        # Stage 2: Parallel fan-out to verification + audit
         Edge(from_node=intent_classifier, to_node=verification_node),
         Edge(from_node=intent_classifier, to_node=audit_logger_node),
+
+        # Parallel branches converge at join node
         Edge(from_node=verification_node, to_node=join_node),
         Edge(from_node=audit_logger_node, to_node=join_node),
+
+        # Stage 3: Join → risk router
         (join_node, risk_router),
+
+        # Stage 4a: Escalation path
         Edge(from_node=risk_router, to_node=escalation_handler, route="escalate"),
+
+        # Stage 4b: Specialist routing path
         Edge(from_node=risk_router, to_node=specialist_router, route="proceed"),
         Edge(from_node=specialist_router, to_node=policy_agent, route="policy_question"),
         Edge(from_node=specialist_router, to_node=claims_agent, route="claim"),
         Edge(from_node=specialist_router, to_node=offers_agent, route="offer"),
         Edge(from_node=specialist_router, to_node=emergency_agent, route="emergency"),
+
+        # Stage 5: All specialist agents → confirmation
         (policy_agent, action_confirmation),
         (claims_agent, action_confirmation),
         (offers_agent, action_confirmation),
