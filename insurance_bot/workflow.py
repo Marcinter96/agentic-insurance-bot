@@ -78,13 +78,24 @@ def replay_transcript(initial: str, questions: dict[int, str], replies: dict[int
 
 
 def _collect_turns(ctx: Context, prefix: str):
-    """Pull stored questions (state) and caller replies (resume_inputs) for a node."""
+    """Rebuild stored questions + caller replies for a loop node.
+
+    IMPORTANT: ``ctx.resume_inputs`` only carries the MOST RECENTLY answered
+    interrupt — ADK replaces it on each resume (it does not accumulate). So a
+    reply must be persisted into ``ctx.state`` the moment it appears, otherwise
+    a 2nd+ turn loses the earlier replies and the conversation restarts.
+    """
     questions: dict[int, str] = {}
     replies: dict[int, str] = {}
     t = 0
     while True:
         q = ctx.state.get(f"{prefix}_q_{t}")
-        r = ctx.resume_inputs.get(f"{prefix}_q_{t}")
+        # Prefer the persisted reply; otherwise capture the just-arrived one and persist it.
+        r = ctx.state.get(f"{prefix}_r_{t}")
+        if r is None:
+            r = ctx.resume_inputs.get(f"{prefix}_q_{t}")
+            if r is not None:
+                ctx.state[f"{prefix}_r_{t}"] = r
         if q is None and r is None:
             break
         if q is not None:
