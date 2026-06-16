@@ -15,7 +15,6 @@ Flow:
                                       → action_confirmation
 """
 
-import json
 import uuid
 import logging
 
@@ -27,145 +26,30 @@ from insurance_bot.agents.policy_agent import policy_agent
 from insurance_bot.agents.claims_agent import claims_agent
 from insurance_bot.agents.offers_agent import offers_agent
 from insurance_bot.agents.emergency_agent import emergency_agent
-from insurance_bot.core.config import LLM_MODEL, GCP_PROJECT, GCP_LOCATION, USE_VERTEX_AI
+from insurance_bot.agents.classifier_agent import classifier_agent
 from insurance_bot.core.gcs_client import gcs
 from insurance_bot.core import audit_logger as audit
 from insurance_bot.core import guardrails
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# LLM client (Vertex AI or Google AI Studio)
-# ---------------------------------------------------------------------------
-
-from google import genai
-
-# Lazy singleton: do NOT build the client at import time (that would require
-# credentials / an API key just to import the module, which ADK does at startup).
-_genai_client = None
-
-
-def _get_genai_client():
-    global _genai_client
-    if _genai_client is None:
-        _genai_client = genai.Client(
-            vertexai=USE_VERTEX_AI,
-            project=GCP_PROJECT if USE_VERTEX_AI else None,
-            location=GCP_LOCATION if USE_VERTEX_AI else None,
-        )
-    return _genai_client
-
-_CLASSIFIER_PROMPT = """\
-You are a friendly insurance call-centre assistant for Zurich Insurance.
-Have a natural conversation to understand what the customer needs, then return a JSON classification.
-
-Conversation so far:
-{history}
-
-Based on the conversation, decide ONE of:
-A) You need more information — respond with a warm, natural follow-up message (plain text, no JSON).
-B) You are confident — respond with ONLY this JSON (no other text):
-{{
-  "intent": "<policy_question|offer|claim|emergency|unknown>",
-  "sub_intent": "<e.g. check claim status>",
-  "risk_level": "<LOW|MEDIUM|HIGH>",
-  "customer_identifiers": {{
-    "phone": "<phone or null>",
-    "birthdate": "<YYYY-MM-DD or null>",
-    "policy_number": "<policy number or null>",
-    "license_plate": "<plate or null>"
-  }},
-  "confidence": <0.0-1.0>
-}}
-
-Rules:
-- Ask at most 1 follow-up question per turn. Max 4 questions total (you have asked {questions_asked} so far).
-- After 4 questions you MUST return JSON with your best guess.
-- If intent is already clear from the conversation, return JSON immediately.
-- Risk: LOW=informational, MEDIUM=reading sensitive docs, HIGH=new claim/emergency/modifying data.
-"""
-
 
 # ---------------------------------------------------------------------------
-# NODE 1 — Intent Classifier (multi-turn conversation via RequestInput)
+# NODE 1 — Intent Classifier (conversational task agent via ctx.run_node)
 # ---------------------------------------------------------------------------
 
 @node(name="intent_classifier", rerun_on_resume=True)
-def intent_classifier(ctx: Context, node_input: str):
-    """Chat with customer until intent is clear, then classify. Uses RequestInput for multi-turn."""
-    session_id = ctx.run_id or str(uuid.uuid4())
-    ctx.state["session_id"] = session_id
+async def intent_classifier(ctx: Context, node_input: str):
+    """Run the conversational classifier agent until it calls classify().
 
-    user_message = node_input if isinstance(node_input, str) else str(node_input)
-
-    # Restore or init conversation history across resumes
-    history: list[dict] = ctx.state.get("_classifier_history", [])
-    questions_asked: int = ctx.state.get("_classifier_q_count", 0)
-
-    if not history:
-        history.append({"role": "Customer", "content": user_message})
-
-    MAX_QUESTIONS = 4
-
-    while True:
-        history_text = "\n".join(f"{t['role']}: {t['content']}" for t in history)
-        prompt = _CLASSIFIER_PROMPT.format(history=history_text, questions_asked=questions_asked)
-
-        try:
-            response = _get_genai_client().models.generate_content(
-                model=LLM_MODEL,
-                contents=prompt,
-            )
-            llm_output = response.text.strip()
-        except Exception as e:
-            logger.warning("LLM call failed: %s", e)
-            llm_output = '{"intent":"unknown","sub_intent":"","risk_level":"LOW","customer_identifiers":{"phone":null,"birthdate":null,"policy_number":null,"license_plate":null},"confidence":0.0}'
-
-        # Try to parse as JSON classification
-        classification = None
-        stripped = llm_output.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        if stripped.startswith("{"):
-            try:
-                classification = json.loads(stripped)
-            except Exception:
-                pass
-
-        if classification:
-            # Done — commit classification
-            classification.setdefault("raw_query", user_message)
-            ctx.state["classification"] = classification
-            ctx.state.pop("_classifier_history", None)
-            ctx.state.pop("_classifier_q_count", None)
-            logger.info(
-                "CLASSIFIED after %d question(s) | intent=%s risk=%s",
-                questions_asked, classification.get("intent"), classification.get("risk_level"),
-            )
-            return
-
-        # It's a follow-up question / conversational reply — send to user
-        if questions_asked >= MAX_QUESTIONS:
-            # Force classify with unknown rather than asking more
-            ctx.state["classification"] = {
-                "intent": "unknown", "sub_intent": "", "risk_level": "LOW",
-                "customer_identifiers": {"phone": None, "birthdate": None, "policy_number": None, "license_plate": None},
-                "confidence": 0.0, "raw_query": user_message,
-            }
-            ctx.state.pop("_classifier_history", None)
-            ctx.state.pop("_classifier_q_count", None)
-            return
-
-        questions_asked += 1
-        history.append({"role": "Assistant", "content": llm_output})
-
-        # Persist state before yielding (rerun_on_resume will re-enter here)
-        ctx.state["_classifier_history"] = history
-        ctx.state["_classifier_q_count"] = questions_asked
-
-        interrupt_id = f"classifier_q{questions_asked}_{session_id}"
-        customer_reply = yield RequestInput(interrupt_id=interrupt_id, message=llm_output)
-
-        history.append({"role": "Customer", "content": str(customer_reply)})
-        ctx.state["_classifier_history"] = history
+    The classifier is a mode='task' LlmAgent: it chats with the caller one
+    question at a time (max 4), then calls the `classify` tool which writes
+    ctx.state["classification"]. Dispatching it via ctx.run_node gives genuine
+    multi-turn conversation (pause/resume per user reply) — which is why this
+    node must have rerun_on_resume=True.
+    """
+    ctx.state["session_id"] = ctx.run_id or str(uuid.uuid4())
+    await ctx.run_node(classifier_agent, node_input)
 
 
 # ---------------------------------------------------------------------------
