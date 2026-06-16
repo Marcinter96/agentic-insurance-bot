@@ -55,63 +55,135 @@ def _get_genai_client():
     return _genai_client
 
 _CLASSIFIER_PROMPT = """\
-You are an insurance call-centre classifier. Extract structured information from the customer's message.
+You are a friendly insurance call-centre assistant for Zurich Insurance.
+Have a natural conversation to understand what the customer needs, then return a JSON classification.
 
-Return ONLY a valid JSON object with these fields:
+Conversation so far:
+{history}
+
+Based on the conversation, decide ONE of:
+A) You need more information — respond with a warm, natural follow-up message (plain text, no JSON).
+B) You are confident — respond with ONLY this JSON (no other text):
 {{
-  "intent": "<one of: policy_question | offer | claim | emergency | unknown>",
-  "sub_intent": "<short description of the specific need, e.g. 'check claim status'>",
-  "risk_level": "<one of: LOW | MEDIUM | HIGH>",
+  "intent": "<policy_question|offer|claim|emergency|unknown>",
+  "sub_intent": "<e.g. check claim status>",
+  "risk_level": "<LOW|MEDIUM|HIGH>",
   "customer_identifiers": {{
-    "phone": "<phone number if mentioned, else null>",
-    "birthdate": "<date of birth if mentioned YYYY-MM-DD, else null>",
-    "policy_number": "<policy number if mentioned, else null>",
-    "license_plate": "<license plate if mentioned, else null>"
+    "phone": "<phone or null>",
+    "birthdate": "<YYYY-MM-DD or null>",
+    "policy_number": "<policy number or null>",
+    "license_plate": "<plate or null>"
   }},
-  "confidence": <float between 0 and 1>
+  "confidence": <0.0-1.0>
 }}
 
-Risk level guide:
-- LOW: informational (offers, general questions, claim status check)
-- MEDIUM: reading sensitive documents (policy copy, invoice details)
-- HIGH: modifying data, filing a new claim, emergency dispatch
-
-Customer message: {message}
+Rules:
+- Ask at most 1 follow-up question per turn. Max 4 questions total (you have asked {questions_asked} so far).
+- After 4 questions you MUST return JSON with your best guess.
+- If intent is already clear from the conversation, return JSON immediately.
+- Risk: LOW=informational, MEDIUM=reading sensitive docs, HIGH=new claim/emergency/modifying data.
 """
 
 
 # ---------------------------------------------------------------------------
-# NODE 1 — Intent Classifier
+# NODE 1 — Intent Classifier (multi-turn conversation via RequestInput)
 # ---------------------------------------------------------------------------
 
-@node(name="intent_classifier")
-def intent_classifier(ctx: Context, node_input: str) -> None:
-    """Classify intent and extract customer identifiers from the user message."""
+@node(name="intent_classifier", rerun_on_resume=True)
+def intent_classifier(ctx: Context, node_input: str):
+    """Chat with customer until intent is clear, then classify. Uses RequestInput for multi-turn."""
     session_id = ctx.run_id or str(uuid.uuid4())
     ctx.state["session_id"] = session_id
 
     user_message = node_input if isinstance(node_input, str) else str(node_input)
 
-    try:
-        response = _get_genai_client().models.generate_content(
-            model=LLM_MODEL,
-            contents=_CLASSIFIER_PROMPT.format(message=user_message),
-            config={"response_mime_type": "application/json"},
-        )
-        classification = json.loads(response.text)
-    except Exception as e:
-        logger.warning(f"LLM classification failed: {e} — defaulting to unknown")
-        classification = {
-            "intent": "unknown",
-            "sub_intent": "",
-            "risk_level": "LOW",
+    # Restore or init conversation history across resumes
+    history: list[dict] = ctx.state.get("_classifier_history", [])
+    questions_asked: int = ctx.state.get("_classifier_q_count", 0)
+
+    if not history:
+        history.append({"role": "Customer", "content": user_message})
+
+    MAX_QUESTIONS = 4
+
+    while True:
+        history_text = "\n".join(f"{t['role']}: {t['content']}" for t in history)
+        prompt = _CLASSIFIER_PROMPT.format(history=history_text, questions_asked=questions_asked)
+
+        try:
+            response = _get_genai_client().models.generate_content(
+                model=LLM_MODEL,
+                contents=prompt,
+            )
+            llm_output = response.text.strip()
+        except Exception as e:
+            logger.warning("LLM call failed: %s", e)
+            llm_output = '{"intent":"unknown","sub_intent":"","risk_level":"LOW","customer_identifiers":{"phone":null,"birthdate":null,"policy_number":null,"license_plate":null},"confidence":0.0}'
+
+        # Try to parse as JSON classification
+        classification = None
+        stripped = llm_output.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        if stripped.startswith("{"):
+            try:
+                classification = json.loads(stripped)
+            except Exception:
+                pass
+
+        if classification:
+            # Done — commit classification
+            classification.setdefault("raw_query", user_message)
+            ctx.state["classification"] = classification
+            ctx.state.pop("_classifier_history", None)
+            ctx.state.pop("_classifier_q_count", None)
+            logger.info(
+                "CLASSIFIED after %d question(s) | intent=%s risk=%s",
+                questions_asked, classification.get("intent"), classification.get("risk_level"),
+            )
+            return
+
+        # It's a follow-up question / conversational reply — send to user
+        if questions_asked >= MAX_QUESTIONS:
+            # Force classify with unknown rather than asking more
+            ctx.state["classification"] = {
+                "intent": "unknown", "sub_intent": "", "risk_level": "LOW",
+                "customer_identifiers": {"phone": None, "birthdate": None, "policy_number": None, "license_plate": None},
+                "confidence": 0.0, "raw_query": user_message,
+            }
+            ctx.state.pop("_classifier_history", None)
+            ctx.state.pop("_classifier_q_count", None)
+            return
+
+        questions_asked += 1
+        history.append({"role": "Assistant", "content": llm_output})
+
+        # Persist state before yielding (rerun_on_resume will re-enter here)
+        ctx.state["_classifier_history"] = history
+        ctx.state["_classifier_q_count"] = questions_asked
+
+        interrupt_id = f"classifier_q{questions_asked}_{session_id}"
+        customer_reply = yield RequestInput(interrupt_id=interrupt_id, message=llm_output)
+
+        history.append({"role": "Customer", "content": str(customer_reply)})
+        ctx.state["_classifier_history"] = history
+
+
+# ---------------------------------------------------------------------------
+# NODE 1b — noop: classification already in state from node 1
+# ---------------------------------------------------------------------------
+
+@node(name="parse_classification")
+def parse_classification(ctx: Context, node_input: str) -> None:
+    """Validate classification is in state (set by intent_classifier)."""
+    if not ctx.state.get("classification"):
+        logger.warning("No classification in state — defaulting to unknown")
+        ctx.state["classification"] = {
+            "intent": "unknown", "sub_intent": "", "risk_level": "LOW",
             "customer_identifiers": {"phone": None, "birthdate": None, "policy_number": None, "license_plate": None},
             "confidence": 0.0,
         }
-
-    classification["raw_query"] = user_message
-    ctx.state["classification"] = classification
-    logger.info("CLASSIFIED | intent=%s risk=%s", classification.get("intent"), classification.get("risk_level"))
+    ctx.state.setdefault("session_id", ctx.run_id or str(uuid.uuid4()))
+    c = ctx.state["classification"]
+    logger.info("CLASSIFICATION CONFIRMED | intent=%s risk=%s", c.get("intent"), c.get("risk_level"))
 
 
 # ---------------------------------------------------------------------------
@@ -406,12 +478,13 @@ root_agent = Workflow(
         "risk assessment, and specialist agents with audit logging."
     ),
     edges=[
-        # Stage 1: START → intent classifier
+        # Stage 1: START → conversational classifier → parse
         (START, intent_classifier),
+        (intent_classifier, parse_classification),
 
         # Stage 2: Parallel fan-out to verification + audit
-        Edge(from_node=intent_classifier, to_node=verification_node),
-        Edge(from_node=intent_classifier, to_node=audit_logger_node),
+        Edge(from_node=parse_classification, to_node=verification_node),
+        Edge(from_node=parse_classification, to_node=audit_logger_node),
 
         # Parallel branches converge at join node
         Edge(from_node=verification_node, to_node=join_node),
