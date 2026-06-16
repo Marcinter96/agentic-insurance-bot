@@ -102,6 +102,11 @@ async def intent_classifier(ctx: Context, node_input):
     """Ask the caller (one question at a time, ≤4) until the intent is clear."""
     ctx.state.setdefault("session_id", ctx.run_id or str(uuid.uuid4()))
 
+    # Each user message replays the workflow from START. Once the intent is
+    # settled, skip the brain entirely — no redundant LLM call on later turns.
+    if ctx.state.get("classification"):
+        return
+
     initial = _content_text(node_input)
     questions, replies = _collect_turns(ctx, "clf")
     transcript, turn = replay_transcript(initial, questions, replies)
@@ -158,6 +163,10 @@ def _finalize_verification(ctx: Context, verification: dict) -> None:
 @node(name="identification_node", rerun_on_resume=True)
 async def identification_node(ctx: Context, node_input=None):
     """Identify the caller: ask for identifiers, look them up, retry, or escalate."""
+    # Already resolved on a previous turn — skip the brain (replay short-circuit).
+    if ctx.state.get("verification"):
+        return
+
     questions, replies = _collect_turns(ctx, "idf")
     transcript, turn = replay_transcript(_seed_for_identifier(ctx), questions, replies)
 
