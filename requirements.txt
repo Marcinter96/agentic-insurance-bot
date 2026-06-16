@@ -9,6 +9,7 @@ google-cloud-pubsub>=2.18.0
 google-cloud-secret-manager>=2.16.0
 uvicorn>=0.27.0
 python-dotenv>=1.0.0
-# Local bidi (mic/speaker) voice run — see bidi_local.py
+# Local bidi (mic/speaker) voice run — see bidi_local.py / aistudio_live_test.py
 sounddevice>=0.5.0
 numpy>=1.26.0
+rich>=13.0.0

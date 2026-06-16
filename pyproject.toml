@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-live"
+version = "0.1.0"
+description = "Minimal ADK live (voice) test harness: mic <-> speaker over Gemini Live."
+requires-python = ">=3.10"
+dependencies = [
+    "google-adk==2.2.0",
+    "python-dotenv>=1.0.0",
+    "sounddevice>=0.5.0",
+    "numpy>=1.26.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+voice-live = "voice_live.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["voice_live*"]

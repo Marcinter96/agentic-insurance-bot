@@ -1,19 +1,20 @@
 """
 Local bidirectional (bidi) live voice run for the insurance bot.
 
-Connects the machine's microphone and speaker directly to the ADK
-`root_agent` via the Gemini Live API:
+Connects this machine's microphone and speaker directly to the ADK
+``root_agent`` via the Gemini Live API:
 
-    mic  --(16kHz PCM)-->  LiveRequestQueue.send_realtime()  -->  Gemini Live
-    speaker  <--(24kHz PCM)--  runner.run_live() audio events  <--  Gemini Live
+    mic     --(16kHz PCM)-->  LiveRequestQueue.send_realtime()  -->  Gemini Live
+    speaker <--(24kHz PCM)--  runner.run_live() audio events    <--  Gemini Live
 
-Logging is intentionally verbose at INFO level so the full bidi loop can be
-debugged (connection, audio frame sizes, transcripts, tool calls, turn
-boundaries, interruptions). Once the flow is verified, flip LOG_LEVEL to DEBUG
-for even more detail, or raise it to WARNING for quiet operation.
+This is a SIMPLE, standalone voice loop (no web UI). It reuses the dual-model
+live agent defined in ``insurance_bot/live_agent.py`` — that agent already
+resolves the native-audio Live model via ``canonical_live_model``, so we do
+NOT override the model here.
 
 Run:
-    python bidi_local.py
+    ADK_BIDI is NOT needed here (we import the live agent directly):
+        python bidi_local.py
 
 Press Ctrl+C to stop.
 """
@@ -74,15 +75,15 @@ async def main() -> None:
     import sounddevice as sd
     from google.adk.runners import InMemoryRunner
     from google.adk.agents.run_config import RunConfig, StreamingMode
+    from google.adk.agents.live_request_queue import LiveRequestQueue
     from google.genai import types
 
-    # Import the agent and point it at the native-audio Live model.
-    import agent as agent_module
+    # Reuse the dual-model live agent. Its canonical_live_model already points
+    # at the native-audio Live model, so run_live() picks the right model.
+    from insurance_bot.live_agent import root_agent
 
-    root_agent = agent_module.root_agent
-    bidi_model = agent_module.BIDI_MODEL
-    root_agent.model = bidi_model
-    logger.info("Using bidi model: %s", bidi_model)
+    logger.info("Live agent: %s", root_agent.name)
+    logger.info("Live model: %s", root_agent.canonical_live_model.model)
     logger.info(
         "Vertex AI backend: %s | project=%s | location=%s",
         os.getenv("GOOGLE_GENAI_USE_VERTEXAI"),
@@ -97,7 +98,8 @@ async def main() -> None:
     )
     logger.info("Created session %s for user %s", SESSION_ID, USER_ID)
 
-    live_request_queue = LiveRequestQueueFactory()
+    live_request_queue = LiveRequestQueue()
+    logger.info("LiveRequestQueue created")
 
     run_config = RunConfig(
         streaming_mode=StreamingMode.BIDI,
@@ -105,9 +107,7 @@ async def main() -> None:
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
     )
-    logger.info(
-        "RunConfig: mode=BIDI, modalities=AUDIO, input/output transcription=ON"
-    )
+    logger.info("RunConfig: mode=BIDI, modalities=AUDIO, transcription=ON")
 
     loop = asyncio.get_running_loop()
 
@@ -155,71 +155,29 @@ async def main() -> None:
     )
 
     async def downstream():
-        """Consume run_live() events and play audio. Logs EVERY event."""
+        """Consume run_live() events: play audio, log transcripts/tools."""
         out_chunks = 0
         out_bytes = 0
-        event_no = 0
         async for event in runner.run_live(
             user_id=USER_ID,
             session_id=SESSION_ID,
             live_request_queue=live_request_queue,
             run_config=run_config,
         ):
-            event_no += 1
-
-            # ---- 1) Always log a one-line summary of the raw event --------
-            author = getattr(event, "author", "?")
-            flags = []
-            for attr in (
-                "partial", "turn_complete", "interrupted",
-                "error_code", "error_message",
-            ):
-                val = getattr(event, attr, None)
-                if val:
-                    flags.append(f"{attr}={val}")
-            # Describe content parts compactly.
-            content = getattr(event, "content", None)
-            part_kinds = []
-            if content and getattr(content, "parts", None):
-                for p in content.parts:
-                    if getattr(p, "inline_data", None) and p.inline_data.data:
-                        part_kinds.append(f"audio({len(p.inline_data.data)}B)")
-                    elif getattr(p, "text", None):
-                        part_kinds.append("text")
-                    elif getattr(p, "function_call", None):
-                        part_kinds.append(f"call:{p.function_call.name}")
-                    elif getattr(p, "function_response", None):
-                        part_kinds.append(f"result:{p.function_response.name}")
-                    else:
-                        part_kinds.append("other")
-            # Extra signals some events carry.
-            for attr in ("usage_metadata", "grounding_metadata", "actions",
-                         "long_running_tool_ids", "custom_metadata",
-                         "input_transcription", "output_transcription"):
-                if getattr(event, attr, None):
-                    flags.append(attr)
-            role = getattr(content, "role", None) if content else None
-            logger.info(
-                "[event #%d] author=%s role=%s parts=[%s] %s",
-                event_no, author, role,
-                ", ".join(part_kinds) if part_kinds else "-",
-                " ".join(flags) if flags else "",
-            )
-
-            # ---- 1.5) TRANSCRIPTS (dedicated fields, not in content.parts) --
+            # Transcripts (dedicated fields, not in content.parts).
             in_tx = getattr(event, "input_transcription", None)
             if in_tx and getattr(in_tx, "text", None):
-                logger.info("[TRANSCRIPT user] %s", in_tx.text.strip())
+                logger.info("[you] %s", in_tx.text.strip())
             out_tx = getattr(event, "output_transcription", None)
             if out_tx and getattr(out_tx, "text", None):
-                logger.info("[TRANSCRIPT agent] %s", out_tx.text.strip())
+                logger.info("[bot] %s", out_tx.text.strip())
 
-            # ---- 2) Interruption (user barged in) -------------------------
+            # Interruption (user barged in).
             if getattr(event, "interrupted", False):
-                logger.info("[event #%d] INTERRUPTED by user - flushing speaker", event_no)
+                logger.info("[interrupted] user barged in — flushing speaker")
                 continue
 
-            # ---- 3) Detailed per-part handling ----------------------------
+            content = getattr(event, "content", None)
             if content and getattr(content, "parts", None):
                 for part in content.parts:
                     inline = getattr(part, "inline_data", None)
@@ -229,12 +187,9 @@ async def main() -> None:
                         speaker_stream.write(inline.data)
                         if out_chunks % 20 == 0:
                             logger.info(
-                                "[speaker] played %d chunks (%.1f KB) from model",
+                                "[speaker] played %d chunks (%.1f KB)",
                                 out_chunks, out_bytes / 1024,
                             )
-                    text = getattr(part, "text", None)
-                    if text:
-                        logger.info("[transcript:%s] %s", role, text.strip())
                     fc = getattr(part, "function_call", None)
                     if fc:
                         logger.info("[tool-call] %s args=%s", fc.name, dict(fc.args or {}))
@@ -242,20 +197,11 @@ async def main() -> None:
                     if fr:
                         logger.info("[tool-result] %s -> %s", fr.name, fr.response)
 
-            # ---- 4) Other notable signals ---------------------------------
-            if getattr(event, "turn_complete", False):
-                logger.info("[event #%d] turn complete", event_no)
-            usage = getattr(event, "usage_metadata", None)
-            if usage:
-                logger.info("[usage] %s", usage)
             if getattr(event, "error_code", None):
                 logger.error(
-                    "[event #%d] error %s: %s",
-                    event_no, event.error_code, getattr(event, "error_message", ""),
+                    "[error] %s: %s",
+                    event.error_code, getattr(event, "error_message", ""),
                 )
-
-            # ---- 5) DEBUG: dump the full event object ---------------------
-            logger.debug("[event #%d raw] %r", event_no, event)
 
     # ----- Start everything ------------------------------------------------
     logger.info("Starting mic + speaker streams. Speak into your microphone.")
@@ -292,15 +238,6 @@ async def main() -> None:
             pass
         live_request_queue.close()
         logger.info("Bye.")
-
-
-def LiveRequestQueueFactory():
-    """Construct a LiveRequestQueue (kept in a helper for a single import site)."""
-    from google.adk.agents.live_request_queue import LiveRequestQueue
-
-    q = LiveRequestQueue()
-    logging.getLogger("bidi").info("LiveRequestQueue created")
-    return q
 
 
 if __name__ == "__main__":
