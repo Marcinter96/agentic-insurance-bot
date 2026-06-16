@@ -1,4 +1,17 @@
+import os
+
 from google.adk.agents import LlmAgent
+
+# ---------------------------------------------------------------------------
+# Model selection
+# ---------------------------------------------------------------------------
+# For bidirectional (bidi) live streaming with AUDIO output, a Live-capable
+# native-audio model is required. Override per-environment via BIDI_AGENT_MODEL.
+#   - Vertex AI Live (this project):  gemini-live-2.5-flash-native-audio
+#   - Gemini Live API (AI Studio):    gemini-2.5-flash-native-audio-preview-12-2025
+# The default text model is kept for the classic `adk web` flow.
+TEXT_MODEL = os.getenv("AGENT_MODEL", "gemini-2.5-flash")
+BIDI_MODEL = os.getenv("BIDI_AGENT_MODEL", "gemini-live-2.5-flash-native-audio")
 
 # ---------------------------------------------------------------------------
 # Skills (dummy tools — replace with real API calls in production)
