@@ -9,13 +9,23 @@ logger = logging.getLogger(__name__)
 
 class GCSClient:
     def __init__(self, bucket_name: str = GCS_BUCKET):
-        self._client = storage.Client()
-        self._bucket = self._client.bucket(bucket_name)
+        # Lazy: do NOT create storage.Client() here. Importing this module must
+        # never require GCP credentials (ADK imports it at `adk web` startup).
+        # The real client/bucket are created on first read/write.
         self._bucket_name = bucket_name
+        self._client = None
+        self._bucket = None
+
+    @property
+    def bucket(self):
+        if self._bucket is None:
+            self._client = storage.Client()
+            self._bucket = self._client.bucket(self._bucket_name)
+        return self._bucket
 
     def _read(self, path: str) -> dict | list | None:
         try:
-            blob = self._bucket.blob(path)
+            blob = self.bucket.blob(path)
             if not blob.exists():
                 return None
             return json.loads(blob.download_as_string())
@@ -25,7 +35,7 @@ class GCSClient:
 
     def _write(self, path: str, data: dict) -> bool:
         try:
-            blob = self._bucket.blob(path)
+            blob = self.bucket.blob(path)
             blob.upload_from_string(json.dumps(data))
             return True
         except Exception as e:
