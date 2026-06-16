@@ -10,12 +10,11 @@ Guardrails are layered: **common** (cross-cutting, app-wide) and **specific** (a
 
 | Direction | Where | What it does |
 |-----------|-------|--------------|
-| **Input** | `input_guardrail` **node** (first node, after `START`) | Screens the opening message. On a block it routes to `guardrail_blocked`, a terminal node that emits a fixed safe refusal — the classifier never runs and Gemini never sees the malicious text. |
+| **Input (opening)** | `input_guardrail` **node** (first node, after `START`) | Screens the opening message. On a block it routes to `guardrail_blocked`, a terminal node that emits a fixed safe refusal — the classifier never runs and Gemini never sees the malicious text. |
+| **Input (replies)** | `_reply_blocked()` inside the `intent_classifier` and `identification_node` loops | Screens the **latest caller reply** each turn (replies arrive via `resume_inputs`, so they bypass the front node). On a block the loop node sets `ctx.route="blocked"` → `guardrail_blocked`. |
 | **Output** | `after_model_callback` **on each specialist** (`core/output_guard.py`) | An *agent-level* callback (invoked by the LlmAgent's own LLM flow, so it fires reliably under a Workflow root) screens the specialist's response *before it is finalized* and redacts secrets / payment-card numbers. |
 
-Only the four customer-facing specialists carry the output callback; the classifier/identifier brains and the safety brain are not screened.
-
-> **Known limitation:** the `input_guardrail` node screens the **opening** message. Mid-conversation replies (answers to "what's your phone number?") are not yet screened — that's a planned follow-up (screen the latest reply inside the loop nodes).
+So every caller utterance is screened — the opening message at the front node, and each subsequent reply inside whichever loop node is active. Only the four customer-facing specialists carry the output callback; the classifier/identifier brains and the safety brain are not screened.
 
 ### Hybrid decision logic (`core/safety.py`)
 

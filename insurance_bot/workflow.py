@@ -95,6 +95,31 @@ def _collect_turns(ctx: Context, prefix: str):
     return questions, replies
 
 
+def _reply_blocked(ctx: Context, replies: dict[int, str]) -> bool:
+    """Screen the most recent caller reply (mid-conversation input guardrail).
+
+    On a block, stashes the refusal and sets ctx.route='blocked'. Returns True
+    if blocked. Earlier replies were already screened on their own turn, so only
+    the latest one needs checking each invocation.
+    """
+    if not replies:
+        return False
+    latest = replies[max(replies)]
+    verdict = safety.screen_input(latest)
+    if verdict["verdict"] != "block":
+        return False
+    logger.warning("INPUT BLOCKED (reply) | category=%s", verdict.get("category"))
+    audit.log_action(
+        session_id=ctx.state.get("session_id", "unknown"), customer_id=None,
+        action="INPUT_GUARDRAIL_BLOCK", intent="unknown", risk_level="HIGH",
+        status="BLOCKED", extra={"category": verdict.get("category"),
+                                 "reason": verdict.get("reason"), "stage": "reply"},
+    )
+    ctx.state["_refusal"] = safety.refusal_message(verdict.get("category", "injection"))
+    ctx.route = "blocked"
+    return True
+
+
 # ---------------------------------------------------------------------------
 # NODE 0 — Input guardrail (deterministic-first; brain only for the gray area)
 # ---------------------------------------------------------------------------
@@ -148,12 +173,19 @@ async def intent_classifier(ctx: Context, node_input):
     # Each user message replays the workflow from START. Once the intent is
     # settled, skip the brain entirely — no redundant LLM call on later turns.
     if ctx.state.get("classification"):
+        ctx.route = "continue"
         return
 
     # The opening message arrives via input_guardrail (which returns nothing),
     # so fall back to the stashed first_message.
     initial = _content_text(node_input) or ctx.state.get("first_message", "")
     questions, replies = _collect_turns(ctx, "clf")
+
+    # Input guardrail for mid-conversation replies (the opening message was
+    # already screened by the input_guardrail node).
+    if _reply_blocked(ctx, replies):
+        return
+
     transcript, turn = replay_transcript(initial, questions, replies)
 
     # One-shot brain call for THIS turn (single_turn agent → returns a dict, never waits).
@@ -165,6 +197,7 @@ async def intent_classifier(ctx: Context, node_input):
         ctx.state["classification"] = build_classification(decision)
         c = ctx.state["classification"]
         logger.info("CLASSIFICATION | intent=%s risk=%s", c["intent"], c["risk_level"])
+        ctx.route = "continue"
         return
 
     # action == 'ask': store the question, then PAUSE for the caller's reply.
@@ -203,6 +236,7 @@ def _finalize_verification(ctx: Context, verification: dict) -> None:
         verification.get("verification_level"),
         verification.get("customer_id"),
     )
+    ctx.route = "continue"
 
 
 @node(name="identification_node", rerun_on_resume=True)
@@ -210,9 +244,15 @@ async def identification_node(ctx: Context, node_input=None):
     """Identify the caller: ask for identifiers, look them up, retry, or escalate."""
     # Already resolved on a previous turn — skip the brain (replay short-circuit).
     if ctx.state.get("verification"):
+        ctx.route = "continue"
         return
 
     questions, replies = _collect_turns(ctx, "idf")
+
+    # Input guardrail for mid-conversation replies.
+    if _reply_blocked(ctx, replies):
+        return
+
     transcript, turn = replay_transcript(_seed_for_identifier(ctx), questions, replies)
 
     attempts = ctx.state.get("idf_attempts", 0)
@@ -434,8 +474,11 @@ root_agent = Workflow(
         Edge(from_node=input_guardrail, to_node=guardrail_blocked, route="blocked"),
         Edge(from_node=input_guardrail, to_node=intent_classifier, route="ok"),
 
-        (intent_classifier, identification_node),
-        (identification_node, risk_router),
+        # Mid-conversation replies are screened inside the loop nodes too.
+        Edge(from_node=intent_classifier, to_node=guardrail_blocked, route="blocked"),
+        Edge(from_node=intent_classifier, to_node=identification_node, route="continue"),
+        Edge(from_node=identification_node, to_node=guardrail_blocked, route="blocked"),
+        Edge(from_node=identification_node, to_node=risk_router, route="continue"),
         Edge(from_node=risk_router, to_node=escalation_handler, route="escalate"),
         Edge(from_node=risk_router, to_node=specialist_router, route="proceed"),
         Edge(from_node=specialist_router, to_node=policy_agent, route="policy_question"),
