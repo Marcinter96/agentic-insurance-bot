@@ -332,11 +332,15 @@ def action_confirmation(ctx: Context, node_input=None):
     customer_id = ctx.state.get("active_customer_id")
     intent = classification.get("intent", "unknown")
 
-    if risk_level == "LOW":
+    # Emergency is time-critical: never block an SOS behind a human-approval
+    # pause. Auto-proceed (still audited). LOW risk also auto-proceeds.
+    if risk_level == "LOW" or intent == "emergency":
         audit.log_action(
             session_id=session_id, customer_id=customer_id,
             action="ACTION_AUTO_APPROVED", intent=intent,
-            risk_level=risk_level, status="SUCCESS",
+            risk_level=risk_level,
+            status="SUCCESS",
+            extra={"emergency_bypass": True} if intent == "emergency" else None,
         )
         return
 

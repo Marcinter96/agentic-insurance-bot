@@ -9,6 +9,7 @@ These docs explain both **how Google ADK works** and **why this bot is built the
 | 03 | [Design decisions](03-design-decisions.md) | Every significant choice and trade-off, including the task-mode bug that reshaped the design and the latency tuning |
 | 04 | [Data & guardrails](04-data-and-guardrails.md) | The GCS data model, verification levels, the deterministic routing rulebook, and the audit trail |
 | 05 | [Running & ops](05-running-and-ops.md) | Setup, environment variables, performance knobs, voice mode, deployment, and troubleshooting |
+| 06 | [Guardrails](06-guardrails.md) | Input/output guardrails: the app-wide GuardrailPlugin, the hybrid rules+brain logic, and per-node/agent/function protections |
 
 ## TL;DR of the philosophy
 

@@ -1,10 +1,23 @@
 import json
 import logging
+import re
 from datetime import datetime
 from google.cloud import storage
 from insurance_bot.core.config import GCS_BUCKET
 
 logger = logging.getLogger(__name__)
+
+# Guardrail: ids are interpolated into GCS blob paths, so they must not contain
+# path separators or traversal. Anything else is rejected (fails safe → "not
+# found") so a crafted id like "../audit_logs/x" can't escape its prefix.
+_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _safe_id(value: str) -> str | None:
+    if value and _SAFE_ID.match(value):
+        return value
+    logger.warning("Rejected unsafe id for GCS path: %r", value)
+    return None
 
 
 class GCSClient:
@@ -50,6 +63,8 @@ class GCSClient:
         return self.get_customer(customer_id) if customer_id else None
 
     def find_customer_by_policy(self, policy_number: str) -> dict | None:
+        if not _safe_id(policy_number):
+            return None
         policy = self._read(f"policies/{policy_number}.json")
         if not policy:
             return None
@@ -63,18 +78,24 @@ class GCSClient:
         return self.get_customer(customer_id) if customer_id else None
 
     def get_customer(self, customer_id: str) -> dict | None:
-        if not customer_id:
+        if not _safe_id(customer_id):
             return None
         return self._read(f"customers/{customer_id}.json")
 
     def get_policy(self, policy_id: str) -> dict | None:
+        if not _safe_id(policy_id):
+            return None
         return self._read(f"policies/{policy_id}.json")
 
     def get_invoices(self, customer_id: str) -> list[dict]:
+        if not _safe_id(customer_id):
+            return []
         data = self._read(f"indexes/customer_invoices/{customer_id}.json")
         return data.get("invoices", []) if data else []
 
     def get_claims(self, customer_id: str) -> list[dict]:
+        if not _safe_id(customer_id):
+            return []
         data = self._read(f"indexes/customer_claims/{customer_id}.json")
         return data.get("claims", []) if data else []
 

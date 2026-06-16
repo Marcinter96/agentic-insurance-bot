@@ -85,6 +85,7 @@ Earlier versions tried to let a multi-turn `mode='task'` agent run the conversat
 | [docs/03-design-decisions.md](docs/03-design-decisions.md) | Every choice and trade-off, including the task-mode bug and the perf tuning |
 | [docs/04-data-and-guardrails.md](docs/04-data-and-guardrails.md) | GCS data model, verification levels, the routing rulebook, audit trail |
 | [docs/05-running-and-ops.md](docs/05-running-and-ops.md) | Setup, env vars, performance knobs, voice mode, troubleshooting |
+| [docs/06-guardrails.md](docs/06-guardrails.md) | Input/output guardrails: the app-wide GuardrailPlugin, the hybrid rules+brain logic, and per-node/agent/function protections |
 
 ---
 
