@@ -139,9 +139,15 @@ def _reply_blocked(ctx: Context, replies: dict[int, str]) -> bool:
 # honor a plugin's before_run early-exit, so the only reliable way to BLOCK an
 # incoming message is to route to a refusal inside the graph.
 
-@node(name="input_guardrail")
+@node(name="input_guardrail", rerun_on_resume=True)
 def input_guardrail(ctx: Context, node_input):
-    """Screen the opening message. Block → refusal; allow → continue."""
+    """Screen the opening message. Block → refusal; allow → continue.
+
+    rerun_on_resume=True: this is a router (sets ctx.route) with conditional
+    outgoing edges. On resume the workflow replays from START to reach the
+    paused node, so this must re-emit its route or the conditional edge won't
+    fire and the resume stalls here.
+    """
     ctx.state.setdefault("session_id", ctx.run_id or str(uuid.uuid4()))
     text = _content_text(node_input)
     # Remember the opening message so the classifier still sees it (this node
@@ -323,7 +329,7 @@ async def identification_node(ctx: Context, node_input=None):
 # NODE 3 — Risk Router (deterministic, no LLM)
 # ---------------------------------------------------------------------------
 
-@node(name="risk_router")
+@node(name="risk_router", rerun_on_resume=True)
 def risk_router(ctx: Context) -> None:
     """Decide: escalate to human or proceed to specialist."""
     verification = ctx.state.get("verification", {})
@@ -404,7 +410,7 @@ def escalation_handler(ctx: Context):
 # NODE 4b — Specialist Router (deterministic, no LLM)
 # ---------------------------------------------------------------------------
 
-@node(name="specialist_router")
+@node(name="specialist_router", rerun_on_resume=True)
 def specialist_router(ctx: Context) -> None:
     """Route to the correct specialist agent based on classified intent."""
     intent = ctx.state.get("classification", {}).get("intent", "unknown")
