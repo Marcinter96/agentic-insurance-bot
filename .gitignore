@@ -50,3 +50,6 @@ data/mock/
 
 # Evaluation reports (generated output)
 evaluation/reports/
+
+# voice_live raw event dumps
+logs/
