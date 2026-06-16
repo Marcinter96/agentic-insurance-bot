@@ -19,6 +19,7 @@ Nothing here performs any LLM call, so it is cheap and side-effect free
 from __future__ import annotations
 
 import logging
+import re
 
 from insurance_bot.core.gcs_client import gcs
 
@@ -84,8 +85,10 @@ def verify_customer(
         }
 
     # Secondary check: birthdate cross-validation (when supplied).
+    # Compare digits-only so "1978-03-12" and "1978/03/12" both match.
     stored_birthdate = customer.get("birthdate")
-    birthdate_match = (birthdate is None) or (stored_birthdate == birthdate)
+    _bd = lambda s: re.sub(r"\D", "", s or "")
+    birthdate_match = (birthdate is None) or (_bd(stored_birthdate) == _bd(birthdate))
 
     if not birthdate_match:
         return {
