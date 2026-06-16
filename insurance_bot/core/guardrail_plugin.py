@@ -41,6 +41,7 @@ def _text_of(content: types.Content | None) -> str:
 class GuardrailPlugin(BasePlugin):
     def __init__(self, name: str = "guardrail"):
         super().__init__(name=name)
+        logger.info("GuardrailPlugin ACTIVE (input + output guardrails enabled)")
 
     # ---- INPUT guardrail -------------------------------------------------
     async def before_run_callback(self, *, invocation_context):
@@ -48,19 +49,31 @@ class GuardrailPlugin(BasePlugin):
         if not text:
             return None
 
-        verdict = safety.screen_input(text)
+        try:
+            verdict = safety.screen_input(text)
+        except Exception as e:  # a guardrail bug must never break the app
+            logger.error("INPUT guardrail error (failing open): %s", e)
+            return None
+
+        # Log EVERY decision so it's visible the guardrail ran (allow included).
+        logger.info("INPUT GUARDRAIL | verdict=%s category=%s | msg=%.60r",
+                    verdict["verdict"], verdict.get("category"), text)
+
         if verdict["verdict"] != "block":
             return None
 
-        session_id = getattr(invocation_context, "session", None)
-        session_id = getattr(session_id, "id", "unknown")
-        audit.log_action(
-            session_id=session_id, customer_id=None,
-            action="INPUT_GUARDRAIL_BLOCK", intent="unknown", risk_level="HIGH",
-            status="BLOCKED", extra={"category": verdict.get("category"),
-                                     "reason": verdict.get("reason")},
-        )
-        logger.warning("INPUT BLOCKED | category=%s", verdict.get("category"))
+        session_id = getattr(getattr(invocation_context, "session", None), "id", "unknown")
+        try:
+            audit.log_action(
+                session_id=session_id, customer_id=None,
+                action="INPUT_GUARDRAIL_BLOCK", intent="unknown", risk_level="HIGH",
+                status="BLOCKED", extra={"category": verdict.get("category"),
+                                         "reason": verdict.get("reason")},
+            )
+        except Exception:
+            pass
+        logger.warning("INPUT BLOCKED | category=%s reason=%s",
+                       verdict.get("category"), verdict.get("reason"))
 
         # Returning a Content halts the run and replies with this message.
         return types.Content(
@@ -77,16 +90,27 @@ class GuardrailPlugin(BasePlugin):
         if not text:
             return None
 
-        verdict = safety.screen_output(text)
+        try:
+            verdict = safety.screen_output(text)
+        except Exception as e:
+            logger.error("OUTPUT guardrail error (failing open): %s", e)
+            return None
+
+        logger.info("OUTPUT GUARDRAIL | agent=%s verdict=%s category=%s",
+                    callback_context.agent_name, verdict["verdict"], verdict.get("category"))
+
         if verdict["verdict"] == "allow":
             return None
 
-        audit.log_action(
-            session_id="unknown", customer_id=None,
-            action="OUTPUT_GUARDRAIL_" + verdict["verdict"].upper(),
-            intent="unknown", risk_level="HIGH", status="REDACTED",
-            extra={"category": verdict.get("category"), "agent": callback_context.agent_name},
-        )
+        try:
+            audit.log_action(
+                session_id="unknown", customer_id=None,
+                action="OUTPUT_GUARDRAIL_" + verdict["verdict"].upper(),
+                intent="unknown", risk_level="HIGH", status="REDACTED",
+                extra={"category": verdict.get("category"), "agent": callback_context.agent_name},
+            )
+        except Exception:
+            pass
         logger.warning("OUTPUT %s | agent=%s category=%s",
                        verdict["verdict"], callback_context.agent_name, verdict.get("category"))
 
