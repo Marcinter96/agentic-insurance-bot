@@ -67,13 +67,26 @@ def verify_customer(
         }
     """
     customer = None
+    matched_by = None
 
     if phone:
         customer = gcs.find_customer_by_phone(phone)
+        if customer:
+            matched_by = "phone"
     if not customer and policy_number:
         customer = gcs.find_customer_by_policy(policy_number)
+        if customer:
+            matched_by = "policy_number"
     if not customer and license_plate:
         customer = gcs.find_customer_by_plate(license_plate)
+        if customer:
+            matched_by = "license_plate"
+
+    logger.info(
+        "SEARCH | tried phone=%s policy=%s plate=%s -> %s",
+        bool(phone), bool(policy_number), bool(license_plate),
+        f"matched cust={customer['id']} by {matched_by}" if customer else "no match",
+    )
 
     if not customer:
         return {
