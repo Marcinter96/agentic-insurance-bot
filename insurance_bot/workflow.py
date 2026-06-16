@@ -30,6 +30,7 @@ from insurance_bot.agents.emergency_agent import emergency_agent
 from insurance_bot.core.config import LLM_MODEL, GCP_PROJECT, GCP_LOCATION, USE_VERTEX_AI
 from insurance_bot.core.gcs_client import gcs
 from insurance_bot.core import audit_logger as audit
+from insurance_bot.core import guardrails
 
 logger = logging.getLogger(__name__)
 
@@ -196,74 +197,16 @@ def verification_node(ctx: Context) -> None:
     classification = ctx.state.get("classification", {})
     identifiers = classification.get("customer_identifiers", {})
 
-    phone = identifiers.get("phone")
-    policy_number = identifiers.get("policy_number")
-    license_plate = identifiers.get("license_plate")
-    birthdate = identifiers.get("birthdate")
-
-    customer = None
-
-    if phone:
-        customer = gcs.find_customer_by_phone(phone)
-    if not customer and policy_number:
-        customer = gcs.find_customer_by_policy(policy_number)
-    if not customer and license_plate:
-        customer = gcs.find_customer_by_plate(license_plate)
-
-    if not customer:
-        ctx.state["verification"] = {
-            "customer_id": None,
-            "verification_level": "UNVERIFIED",
-            "allowed_actions": [],
-            "failure_reason": "No matching customer found for the provided identifiers.",
-            "customer_data": {},
-        }
-        return
-
-    # Secondary check: birthdate cross-validation
-    stored_birthdate = customer.get("birthdate")
-    birthdate_match = (birthdate is None) or (stored_birthdate == birthdate)
-
-    if not birthdate_match:
-        ctx.state["verification"] = {
-            "customer_id": customer["id"],
-            "verification_level": "ESCALATED",
-            "allowed_actions": [],
-            "failure_reason": "Birthdate does not match our records.",
-            "customer_data": {},
-        }
-        return
-
-    account_status = customer.get("account_status", "ACTIVE")
-    verification_level = customer.get("verification_level", "VERIFIED_NEW")
-
-    if account_status != "ACTIVE":
-        verification_level = "ESCALATED"
-
-    allowed = _get_allowed_actions(verification_level)
-
-    ctx.state["verification"] = {
-        "customer_id": customer["id"],
-        "verification_level": verification_level,
-        "allowed_actions": allowed,
-        "failure_reason": None,
-        "customer_data": {
-            "name": customer.get("name"),
-            "policy_ids": customer.get("policy_ids", []),
-            "vehicle_ids": customer.get("vehicle_ids", []),
-        },
-    }
-    logger.info("VERIFIED | customer=%s level=%s", customer["id"], verification_level)
+    ctx.state["verification"] = guardrails.verify_customer(
+        phone=identifiers.get("phone"),
+        policy_number=identifiers.get("policy_number"),
+        license_plate=identifiers.get("license_plate"),
+        birthdate=identifiers.get("birthdate"),
+    )
 
 
 def _get_allowed_actions(level: str) -> list[str]:
-    matrix = {
-        "VERIFIED_RETURNING": ["policy_question", "claim", "offer", "emergency"],
-        "VERIFIED_NEW": ["policy_question", "offer", "emergency"],
-        "ESCALATED": [],
-        "UNVERIFIED": [],
-    }
-    return matrix.get(level, [])
+    return guardrails.get_allowed_actions(level)
 
 
 # ---------------------------------------------------------------------------
@@ -304,20 +247,11 @@ def risk_router(ctx: Context) -> None:
     verification = ctx.state.get("verification", {})
     classification = ctx.state.get("classification", {})
 
-    verification_level = verification.get("verification_level", "UNVERIFIED")
-    intent = classification.get("intent", "unknown")
-    allowed_actions = verification.get("allowed_actions", [])
-
-    if (
-        verification_level in ("UNVERIFIED", "ESCALATED")
-        or intent == "unknown"
-        or (intent != "unknown" and intent not in allowed_actions)
-    ):
-        ctx.route = "escalate"
-    else:
-        ctx.route = "proceed"
-
-    logger.info("ROUTING | %s → %s", verification_level, ctx.route)
+    ctx.route = guardrails.decide_route(
+        verification_level=verification.get("verification_level", "UNVERIFIED"),
+        intent=classification.get("intent", "unknown"),
+        allowed_actions=verification.get("allowed_actions", []),
+    )
 
 
 # ---------------------------------------------------------------------------
