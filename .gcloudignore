@@ -1,0 +1,28 @@
+# .git directory
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+.Python
+*.egg-info/
+.venv
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local dev
+.env
+.adk/
+.pytest_cache/
+
+# Testing
+*.log
