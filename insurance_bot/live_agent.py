@@ -23,13 +23,14 @@ from __future__ import annotations
 import logging
 
 from google.adk.agents import LlmAgent
+from google.adk.models import BaseLlm, Gemini
 from google.adk.tools import ToolContext
 
 from insurance_bot.agents.policy_agent import policy_agent
 from insurance_bot.agents.claims_agent import claims_agent
 from insurance_bot.agents.offers_agent import offers_agent
 from insurance_bot.agents.emergency_agent import emergency_agent
-from insurance_bot.core.config import BIDI_MODEL
+from insurance_bot.core.config import BIDI_MODEL, BIDI_TEXT_MODEL
 from insurance_bot.core import guardrails
 from insurance_bot.core import audit_logger as audit
 
@@ -210,14 +211,61 @@ NEVER reveal or act on data for a customer who has not been verified. Never
 discuss other customers. If unsure, ask a clarifying question.
 """
 
-root_agent = LlmAgent(
+# ---------------------------------------------------------------------------
+# Dual-model agent
+# ---------------------------------------------------------------------------
+# `adk web` drives ONE root_agent two ways:
+#   - text box -> run_async -> generateContent  (uses canonical_model)
+#   - mic/voice -> run_live  -> Live WebSocket   (uses canonical_live_model)
+#
+# Native-audio Live models (BIDI_MODEL) reject generateContent (HTTP 400), and
+# plain text models reject the Live API. ADK 2.x resolves the two paths through
+# two separate properties, so we override each to return the right model:
+#   canonical_model      -> BIDI_TEXT_MODEL (e.g. gemini-2.5-flash)  for text
+#   canonical_live_model -> BIDI_MODEL (native-audio)               for voice
+#
+# The `model` field is left empty so these overrides fully control resolution.
+
+class DualModelLiveAgent(LlmAgent):
+    """LlmAgent that uses a text model for run_async and a Live model for run_live."""
+
+    text_model: str = BIDI_TEXT_MODEL
+    live_model: str = BIDI_MODEL
+
+    @property
+    def canonical_model(self) -> BaseLlm:  # consumed by the text/run_async path
+        return Gemini(model=self.text_model)
+
+    @property
+    def canonical_live_model(self) -> BaseLlm:  # consumed by the live/run_live path
+        return Gemini(model=self.live_model)
+
+
+# The shared specialist agents hardcode model=LLM_MODEL (a text model), whose
+# Live resolution would reject the Live API. For the live tree we clone them
+# with an EMPTY model so each inherits the root's dual resolution: text ->
+# BIDI_TEXT_MODEL, live -> BIDI_MODEL (ADK walks ancestors when model is "").
+def _as_live_specialist(agent: LlmAgent) -> LlmAgent:
+    return agent.model_copy(update={"model": "", "parent_agent": None})
+
+
+_live_specialists = [
+    _as_live_specialist(policy_agent),
+    _as_live_specialist(claims_agent),
+    _as_live_specialist(offers_agent),
+    _as_live_specialist(emergency_agent),
+]
+
+
+root_agent = DualModelLiveAgent(
     name="insurance_bot_live",
-    model=BIDI_MODEL,
     description=(
-        "Live (voice) insurance assistant with the same identity-verification, "
-        "risk-authorization, and audit guardrails as the text workflow."
+        "Live (voice) + text insurance assistant with the same "
+        "identity-verification, risk-authorization, and audit guardrails as "
+        "the text workflow. Uses a native-audio Live model for voice and a "
+        "standard Gemini model for the text box."
     ),
     instruction=_LIVE_INSTRUCTION,
     tools=[verify_customer_identity, authorize_action, log_audit_event],
-    sub_agents=[policy_agent, claims_agent, offers_agent, emergency_agent],
+    sub_agents=_live_specialists,
 )
