@@ -1,5 +1,5 @@
 from google.adk.agents import LlmAgent
-from core.config import LLM_MODEL
+from insurance_bot.core.config import LLM_MODEL
 
 
 def list_available_products() -> list[dict]:
