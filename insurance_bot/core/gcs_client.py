@@ -35,7 +35,10 @@ def _lookup_normalized(index: dict, raw: str, normalizer) -> str | None:
 
     Tries an exact hit first, then a format-insensitive match (e.g. a phone
     typed as '0457 123 456' matches the stored '0457-123-456')."""
-    if not index or not raw:
+    if not index:
+        logger.warning("LOOKUP | index empty/missing for %r", raw)
+        return None
+    if not raw:
         return None
     if raw in index:
         return index[raw]
@@ -45,6 +48,8 @@ def _lookup_normalized(index: dict, raw: str, normalizer) -> str | None:
     for key, cid in index.items():
         if normalizer(key) == target:
             return cid
+    logger.info("LOOKUP | no match for %r (normalized=%r) among %d index entries",
+                raw, target, len(index))
     return None
 
 
