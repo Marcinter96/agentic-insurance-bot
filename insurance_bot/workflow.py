@@ -2,10 +2,9 @@
 Insurance Bot — Guardrailed Multi-Agent Workflow (ADK 2.2.0)
 
 Flow:
-  START → intent_classifier
-        → [verification_node ‖ audit_logger]  (parallel)
-        → join_node
-        → risk_router
+  START → intent_classifier       (task LlmAgent — conversational, ≤4 questions)
+        → identification_node     (task LlmAgent — collects ID, GCS lookup)
+        → risk_router             (deterministic, no LLM)
             ├─[escalate]→ escalation_handler  (HITL if needed)
             └─[proceed]→ specialist_router
                            ├─[policy_question]→ policy_agent
@@ -19,7 +18,7 @@ import uuid
 import logging
 
 from google.adk import Context
-from google.adk.workflow import Workflow, node, JoinNode, Edge, START
+from google.adk.workflow import Workflow, node, Edge, START
 from google.adk.workflow._function_node import RequestInput
 
 from insurance_bot.agents.policy_agent import policy_agent
@@ -27,7 +26,7 @@ from insurance_bot.agents.claims_agent import claims_agent
 from insurance_bot.agents.offers_agent import offers_agent
 from insurance_bot.agents.emergency_agent import emergency_agent
 from insurance_bot.agents.classifier_agent import classifier_agent
-from insurance_bot.core.gcs_client import gcs
+from insurance_bot.agents.identifier_agent import identifier_agent
 from insurance_bot.core import audit_logger as audit
 from insurance_bot.core import guardrails
 
@@ -35,90 +34,87 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# NODE 1 — Intent Classifier (conversational task agent via ctx.run_node)
+# NODE 1 — Intent Classifier (conversational task agent)
 # ---------------------------------------------------------------------------
 
 @node(name="intent_classifier", rerun_on_resume=True)
 async def intent_classifier(ctx: Context, node_input: str):
-    """Run the conversational classifier agent until it calls classify().
+    """Run the conversational classifier agent until it calls classify() + finish_task.
 
-    The classifier is a mode='task' LlmAgent: it chats with the caller one
-    question at a time (max 4), then calls the `classify` tool which writes
-    ctx.state["classification"]. Dispatching it via ctx.run_node gives genuine
-    multi-turn conversation (pause/resume per user reply) — which is why this
-    node must have rerun_on_resume=True.
+    Uses raise_on_wait=True so the framework pauses the workflow whenever the
+    task agent produces a question but hasn't finished yet (no finish_task call).
+    On resume the parent node reruns, dispatches the agent again — the agent sees
+    the full conversation history (including the user's reply) and continues.
     """
-    ctx.state["session_id"] = ctx.run_id or str(uuid.uuid4())
-    await ctx.run_node(classifier_agent, node_input)
+    ctx.state.setdefault("session_id", ctx.run_id or str(uuid.uuid4()))
+    # NodeInterruptedError (BaseException) propagates to NodeRunner automatically;
+    # no try/except needed here.
+    await ctx.run_node(classifier_agent, node_input, raise_on_wait=True)
 
-
-# ---------------------------------------------------------------------------
-# NODE 1b — noop: classification already in state from node 1
-# ---------------------------------------------------------------------------
-
-@node(name="parse_classification")
-def parse_classification(ctx: Context, node_input: str) -> None:
-    """Validate classification is in state (set by intent_classifier)."""
+    # Ensure classification is present (defensive fallback)
     if not ctx.state.get("classification"):
-        logger.warning("No classification in state — defaulting to unknown")
+        logger.warning("Classifier finished without writing classification — defaulting to unknown")
         ctx.state["classification"] = {
-            "intent": "unknown", "sub_intent": "", "risk_level": "LOW",
-            "customer_identifiers": {"phone": None, "birthdate": None, "policy_number": None, "license_plate": None},
+            "intent": "unknown",
+            "sub_intent": "",
+            "risk_level": "LOW",
+            "customer_identifiers": {
+                "phone": None, "birthdate": None,
+                "policy_number": None, "license_plate": None,
+            },
             "confidence": 0.0,
         }
-    ctx.state.setdefault("session_id", ctx.run_id or str(uuid.uuid4()))
+
     c = ctx.state["classification"]
-    logger.info("CLASSIFICATION CONFIRMED | intent=%s risk=%s", c.get("intent"), c.get("risk_level"))
+    logger.info("CLASSIFICATION | intent=%s risk=%s", c.get("intent"), c.get("risk_level"))
 
 
 # ---------------------------------------------------------------------------
-# NODE 2a — Customer Verification
+# NODE 2 — Identity Verification (conversational task agent)
 # ---------------------------------------------------------------------------
 
-@node(name="verification_node")
-def verification_node(ctx: Context) -> None:
-    """Identify and verify the customer using any available identifier."""
+@node(name="identification_node", rerun_on_resume=True)
+async def identification_node(ctx: Context, node_input: str | None = None):
+    """Run the conversational identifier agent until it calls identify_customer() + finish_task.
+
+    Passes any identifiers already collected by the classifier so the agent
+    does not re-ask for information the caller already provided.
+    """
+    # Build prefill context from what the classifier already captured
+    ids = ctx.state.get("classification", {}).get("customer_identifiers", {})
+    if ids and any(ids.values()):
+        parts = [f"{k}={v}" for k, v in ids.items() if v]
+        prefill = "Already collected: " + ", ".join(parts) + ". Try these first."
+    else:
+        prefill = ""
+
+    await ctx.run_node(identifier_agent, prefill or "", raise_on_wait=True)
+
+    # Ensure verification is present (defensive fallback)
+    if not ctx.state.get("verification"):
+        logger.warning("Identifier finished without writing verification — defaulting to UNVERIFIED")
+        ctx.state["verification"] = {
+            "customer_id": None,
+            "verification_level": "UNVERIFIED",
+            "allowed_actions": [],
+            "failure_reason": "Verification agent did not complete.",
+            "customer_data": {},
+        }
+
+    v = ctx.state["verification"]
+    logger.info("VERIFICATION | level=%s customer=%s", v.get("verification_level"), v.get("customer_id"))
+
+    # Audit log after both agents have completed
+    session_id = ctx.state.get("session_id", "unknown")
     classification = ctx.state.get("classification", {})
-    identifiers = classification.get("customer_identifiers", {})
-
-    ctx.state["verification"] = guardrails.verify_customer(
-        phone=identifiers.get("phone"),
-        policy_number=identifiers.get("policy_number"),
-        license_plate=identifiers.get("license_plate"),
-        birthdate=identifiers.get("birthdate"),
-    )
-
-
-def _get_allowed_actions(level: str) -> list[str]:
-    return guardrails.get_allowed_actions(level)
-
-
-# ---------------------------------------------------------------------------
-# NODE 2b — Audit Logger
-# ---------------------------------------------------------------------------
-
-@node(name="audit_logger")
-def audit_logger_node(ctx: Context) -> None:
-    """Immediately log the incoming request to the audit trail."""
-    classification = ctx.state.get("classification", {})
-    session_id = ctx.state.get("session_id", ctx.run_id or "unknown")
-
-    log_entry_id = audit.log_action(
+    audit.log_action(
         session_id=session_id,
-        customer_id=None,
+        customer_id=v.get("customer_id"),
         action="REQUEST_RECEIVED",
         intent=classification.get("intent", "unknown"),
         risk_level=classification.get("risk_level", "LOW"),
         status="INITIATED",
     )
-    ctx.state["log_entry_id"] = log_entry_id
-
-
-# ---------------------------------------------------------------------------
-# Join node (waits for both 2a and 2b)
-# ---------------------------------------------------------------------------
-
-join_node = JoinNode(name="join_after_parallel")
 
 
 # ---------------------------------------------------------------------------
@@ -292,36 +288,30 @@ root_agent = Workflow(
     name="insurance_bot_workflow",
     description=(
         "Guardrailed multi-agent insurance bot. "
-        "Routes customer requests through identity verification, "
-        "risk assessment, and specialist agents with audit logging."
+        "Sequentially classifies intent (Agent 1), verifies identity (Agent 2), "
+        "then routes to the right specialist with full audit logging."
     ),
     edges=[
-        # Stage 1: START → conversational classifier → parse
+        # Stage 1: classify intent
         (START, intent_classifier),
-        (intent_classifier, parse_classification),
 
-        # Stage 2: Parallel fan-out to verification + audit
-        Edge(from_node=parse_classification, to_node=verification_node),
-        Edge(from_node=parse_classification, to_node=audit_logger_node),
+        # Stage 2: verify identity (sequential after classification)
+        (intent_classifier, identification_node),
 
-        # Parallel branches converge at join node
-        Edge(from_node=verification_node, to_node=join_node),
-        Edge(from_node=audit_logger_node, to_node=join_node),
+        # Stage 3: deterministic risk routing
+        (identification_node, risk_router),
 
-        # Stage 3: Join → risk router
-        (join_node, risk_router),
-
-        # Stage 4a: Escalation path
+        # Stage 4a: escalation path
         Edge(from_node=risk_router, to_node=escalation_handler, route="escalate"),
 
-        # Stage 4b: Specialist routing path
+        # Stage 4b: specialist routing
         Edge(from_node=risk_router, to_node=specialist_router, route="proceed"),
         Edge(from_node=specialist_router, to_node=policy_agent, route="policy_question"),
         Edge(from_node=specialist_router, to_node=claims_agent, route="claim"),
         Edge(from_node=specialist_router, to_node=offers_agent, route="offer"),
         Edge(from_node=specialist_router, to_node=emergency_agent, route="emergency"),
 
-        # Stage 5: All specialist agents → confirmation
+        # Stage 5: all specialist agents → confirmation
         (policy_agent, action_confirmation),
         (claims_agent, action_confirmation),
         (offers_agent, action_confirmation),
