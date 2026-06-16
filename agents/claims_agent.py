@@ -1,6 +1,6 @@
 from google.adk.agents import LlmAgent
-from core.config import LLM_MODEL
-from core.gcs_client import gcs
+from insurance_bot.core.config import LLM_MODEL
+from insurance_bot.core.gcs_client import gcs
 import uuid
 from datetime import datetime
 

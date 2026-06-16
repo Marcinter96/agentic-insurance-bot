@@ -1,6 +1,6 @@
 from google.adk.agents import LlmAgent
-from core.config import LLM_MODEL
-from core.gcs_client import gcs
+from insurance_bot.core.config import LLM_MODEL
+from insurance_bot.core.gcs_client import gcs
 
 
 def get_policy_details(policy_id: str, customer_id: str) -> dict:

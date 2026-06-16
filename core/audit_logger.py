@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from core.config import GCP_PROJECT
+from insurance_bot.core.config import GCP_PROJECT
 
 logger = logging.getLogger("insurance-bot")
 

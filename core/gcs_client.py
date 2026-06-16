@@ -2,7 +2,7 @@ import json
 import logging
 from datetime import datetime
 from google.cloud import storage
-from core.config import GCS_BUCKET
+from insurance_bot.core.config import GCS_BUCKET
 
 logger = logging.getLogger(__name__)
 

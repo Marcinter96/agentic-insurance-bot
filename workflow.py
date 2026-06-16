@@ -23,13 +23,13 @@ from google.adk import Context
 from google.adk.workflow import Workflow, node, JoinNode, Edge, START
 from google.adk.workflow._function_node import RequestInput
 
-from agents.policy_agent import policy_agent
-from agents.claims_agent import claims_agent
-from agents.offers_agent import offers_agent
-from agents.emergency_agent import emergency_agent
-from core.config import LLM_MODEL, GCP_PROJECT, GCP_LOCATION, USE_VERTEX_AI
-from core.gcs_client import gcs
-from core import audit_logger as audit
+from insurance_bot.agents.policy_agent import policy_agent
+from insurance_bot.agents.claims_agent import claims_agent
+from insurance_bot.agents.offers_agent import offers_agent
+from insurance_bot.agents.emergency_agent import emergency_agent
+from insurance_bot.core.config import LLM_MODEL, GCP_PROJECT, GCP_LOCATION, USE_VERTEX_AI
+from insurance_bot.core.gcs_client import gcs
+from insurance_bot.core import audit_logger as audit
 
 logger = logging.getLogger(__name__)
 
