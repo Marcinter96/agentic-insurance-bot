@@ -1,19 +1,26 @@
 """
 Insurance Bot — Guardrailed Multi-Agent Workflow (ADK 2.2.0)
 
+Division of labour (the model we agreed on):
+  • Workflow  = the director. Owns the order of steps AND "stop and wait for
+                the caller" (via yield RequestInput). Nothing else pauses.
+  • Agent     = a one-shot brain. Given the conversation so far it returns ONE
+                structured decision (ask / done / lookup). It never loops or waits.
+  • Function  = plain deterministic code: the database lookup (guardrails.
+                verify_customer) and the routing rulebook (guardrails.decide_route).
+
 Flow:
-  START → intent_classifier       (task LlmAgent — conversational, ≤4 questions)
-        → identification_node     (task LlmAgent — collects ID, GCS lookup)
-        → risk_router             (deterministic, no LLM)
-            ├─[escalate]→ escalation_handler  (HITL if needed)
-            └─[proceed]→ specialist_router
-                           ├─[policy_question]→ policy_agent
-                           ├─[claim]         → claims_agent
-                           ├─[offer]         → offers_agent
-                           └─[emergency]     → emergency_agent
-                                      → action_confirmation
+  START → intent_classifier   (loop: ask ↔ wait, until intent is known)
+        → identification_node  (loop: ask ↔ wait ↔ db lookup, until verified or give up)
+        → risk_router          (deterministic, no LLM)
+            ├─[escalate]→ escalation_handler
+            └─[proceed]→ specialist_router → {policy|claims|offers|emergency}_agent
+                                           → action_confirmation
 """
 
+from __future__ import annotations
+
+import asyncio
 import uuid
 import logging
 
@@ -25,96 +32,196 @@ from insurance_bot.agents.policy_agent import policy_agent
 from insurance_bot.agents.claims_agent import claims_agent
 from insurance_bot.agents.offers_agent import offers_agent
 from insurance_bot.agents.emergency_agent import emergency_agent
-from insurance_bot.agents.classifier_agent import classifier_agent
-from insurance_bot.agents.identifier_agent import identifier_agent
+from insurance_bot.agents.classifier_agent import classifier_brain, build_classification
+from insurance_bot.agents.identifier_agent import identifier_brain
 from insurance_bot.core import audit_logger as audit
 from insurance_bot.core import guardrails
 
 logger = logging.getLogger(__name__)
 
+MAX_CLASSIFIER_TURNS = 4   # at most 4 questions to find the intent
+MAX_IDENTIFIER_TURNS = 4   # at most 4 questions to identify the caller
+MAX_LOOKUPS = 2            # phone+birthdate, then policy/plate
+
 
 # ---------------------------------------------------------------------------
-# NODE 1 — Intent Classifier (conversational task agent)
+# Pure helpers (no ADK, no network — unit-testable)
+# ---------------------------------------------------------------------------
+
+def _content_text(value) -> str:
+    """Best-effort extraction of plain text from a node_input."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    parts = getattr(getattr(value, "content", value), "parts", None)
+    if parts:
+        return "".join(p.text for p in parts if getattr(p, "text", None))
+    return str(value)
+
+
+def replay_transcript(initial: str, questions: dict[int, str], replies: dict[int, str]):
+    """Rebuild the conversation transcript deterministically.
+
+    `questions[t]` is the bot's question on turn t (stored in state before each
+    pause); `replies[t]` is the caller's answer (from ctx.resume_inputs). A turn
+    is "closed" only when both are present. Returns (transcript_lines, open_turn).
+    """
+    transcript = [f"Caller: {initial}"] if initial else []
+    turn = 0
+    while turn in questions and turn in replies:
+        transcript.append(f"Assistant: {questions[turn]}")
+        transcript.append(f"Caller: {replies[turn]}")
+        turn += 1
+    return transcript, turn
+
+
+def _collect_turns(ctx: Context, prefix: str):
+    """Pull stored questions (state) and caller replies (resume_inputs) for a node."""
+    questions: dict[int, str] = {}
+    replies: dict[int, str] = {}
+    t = 0
+    while True:
+        q = ctx.state.get(f"{prefix}_q_{t}")
+        r = ctx.resume_inputs.get(f"{prefix}_q_{t}")
+        if q is None and r is None:
+            break
+        if q is not None:
+            questions[t] = q
+        if r is not None:
+            replies[t] = r
+        t += 1
+    return questions, replies
+
+
+# ---------------------------------------------------------------------------
+# NODE 1 — Intent Classifier (workflow owns the loop; brain answers one turn)
 # ---------------------------------------------------------------------------
 
 @node(name="intent_classifier", rerun_on_resume=True)
-async def intent_classifier(ctx: Context, node_input: str):
-    """Run the conversational classifier agent until it calls classify() + finish_task.
-
-    Uses raise_on_wait=True so the framework pauses the workflow whenever the
-    task agent produces a question but hasn't finished yet (no finish_task call).
-    On resume the parent node reruns, dispatches the agent again — the agent sees
-    the full conversation history (including the user's reply) and continues.
-    """
+async def intent_classifier(ctx: Context, node_input):
+    """Ask the caller (one question at a time, ≤4) until the intent is clear."""
     ctx.state.setdefault("session_id", ctx.run_id or str(uuid.uuid4()))
-    # NodeInterruptedError (BaseException) propagates to NodeRunner automatically;
-    # no try/except needed here.
-    await ctx.run_node(classifier_agent, node_input, raise_on_wait=True)
 
-    # Ensure classification is present (defensive fallback)
-    if not ctx.state.get("classification"):
-        logger.warning("Classifier finished without writing classification — defaulting to unknown")
-        ctx.state["classification"] = {
-            "intent": "unknown",
-            "sub_intent": "",
-            "risk_level": "LOW",
-            "customer_identifiers": {
-                "phone": None, "birthdate": None,
-                "policy_number": None, "license_plate": None,
-            },
-            "confidence": 0.0,
-        }
+    # Each user message replays the workflow from START. Once the intent is
+    # settled, skip the brain entirely — no redundant LLM call on later turns.
+    if ctx.state.get("classification"):
+        return
 
-    c = ctx.state["classification"]
-    logger.info("CLASSIFICATION | intent=%s risk=%s", c.get("intent"), c.get("risk_level"))
+    initial = _content_text(node_input)
+    questions, replies = _collect_turns(ctx, "clf")
+    transcript, turn = replay_transcript(initial, questions, replies)
+
+    # One-shot brain call for THIS turn (single_turn agent → returns a dict, never waits).
+    decision = await ctx.run_node(
+        classifier_brain, "\n".join(transcript), run_id=f"clf_brain_t{turn}"
+    ) or {}
+
+    if turn >= MAX_CLASSIFIER_TURNS or decision.get("action") == "done":
+        ctx.state["classification"] = build_classification(decision)
+        c = ctx.state["classification"]
+        logger.info("CLASSIFICATION | intent=%s risk=%s", c["intent"], c["risk_level"])
+        return
+
+    # action == 'ask': store the question, then PAUSE for the caller's reply.
+    question = decision.get("question") or "Could you tell me a little more about what you need?"
+    ctx.state[f"clf_q_{turn}"] = question
+    yield RequestInput(interrupt_id=f"clf_q_{turn}", message=question)
 
 
 # ---------------------------------------------------------------------------
-# NODE 2 — Identity Verification (conversational task agent)
+# NODE 2 — Identity Verification (loop: ask ↔ wait ↔ db lookup)
 # ---------------------------------------------------------------------------
 
-@node(name="identification_node", rerun_on_resume=True)
-async def identification_node(ctx: Context, node_input: str | None = None):
-    """Run the conversational identifier agent until it calls identify_customer() + finish_task.
-
-    Passes any identifiers already collected by the classifier so the agent
-    does not re-ask for information the caller already provided.
-    """
-    # Build prefill context from what the classifier already captured
+def _seed_for_identifier(ctx: Context) -> str:
+    """Seed line: tell the brain which identifiers the classifier already captured."""
     ids = ctx.state.get("classification", {}).get("customer_identifiers", {})
-    if ids and any(ids.values()):
-        parts = [f"{k}={v}" for k, v in ids.items() if v]
-        prefill = "Already collected: " + ", ".join(parts) + ". Try these first."
-    else:
-        prefill = ""
+    have = {k: v for k, v in ids.items() if v}
+    if have:
+        return "Caller already provided: " + ", ".join(f"{k}={v}" for k, v in have.items())
+    return "Caller needs to be identified."
 
-    await ctx.run_node(identifier_agent, prefill or "", raise_on_wait=True)
 
-    # Ensure verification is present (defensive fallback)
-    if not ctx.state.get("verification"):
-        logger.warning("Identifier finished without writing verification — defaulting to UNVERIFIED")
-        ctx.state["verification"] = {
-            "customer_id": None,
-            "verification_level": "UNVERIFIED",
-            "allowed_actions": [],
-            "failure_reason": "Verification agent did not complete.",
-            "customer_data": {},
-        }
-
-    v = ctx.state["verification"]
-    logger.info("VERIFICATION | level=%s customer=%s", v.get("verification_level"), v.get("customer_id"))
-
-    # Audit log after both agents have completed
-    session_id = ctx.state.get("session_id", "unknown")
+def _finalize_verification(ctx: Context, verification: dict) -> None:
+    """Write verification to state and audit-log the resolved request."""
+    ctx.state["verification"] = verification
     classification = ctx.state.get("classification", {})
     audit.log_action(
-        session_id=session_id,
-        customer_id=v.get("customer_id"),
+        session_id=ctx.state.get("session_id", "unknown"),
+        customer_id=verification.get("customer_id"),
         action="REQUEST_RECEIVED",
         intent=classification.get("intent", "unknown"),
         risk_level=classification.get("risk_level", "LOW"),
         status="INITIATED",
     )
+    logger.info(
+        "VERIFICATION | level=%s customer=%s",
+        verification.get("verification_level"),
+        verification.get("customer_id"),
+    )
+
+
+@node(name="identification_node", rerun_on_resume=True)
+async def identification_node(ctx: Context, node_input=None):
+    """Identify the caller: ask for identifiers, look them up, retry, or escalate."""
+    # Already resolved on a previous turn — skip the brain (replay short-circuit).
+    if ctx.state.get("verification"):
+        return
+
+    questions, replies = _collect_turns(ctx, "idf")
+    transcript, turn = replay_transcript(_seed_for_identifier(ctx), questions, replies)
+
+    attempts = ctx.state.get("idf_attempts", 0)
+    notes: list[str] = []
+
+    while True:
+        brain_input = "\n".join(transcript + notes)
+        decision = await ctx.run_node(
+            identifier_brain, brain_input, run_id=f"idf_brain_t{turn}_a{attempts}"
+        ) or {}
+        action = decision.get("action")
+
+        if action == "lookup" and attempts < MAX_LOOKUPS:
+            # verify_customer does synchronous GCS reads; run it off the event
+            # loop so the blocking network I/O doesn't stall the workflow.
+            result = await asyncio.to_thread(
+                guardrails.verify_customer,
+                phone=decision.get("phone") or None,
+                birthdate=decision.get("birthdate") or None,
+                policy_number=decision.get("policy_number") or None,
+                license_plate=decision.get("license_plate") or None,
+            )
+            attempts += 1
+            ctx.state["idf_attempts"] = attempts
+
+            level = result.get("verification_level")
+            if level in ("VERIFIED_RETURNING", "VERIFIED_NEW", "ESCALATED"):
+                _finalize_verification(ctx, result)
+                return
+
+            # UNVERIFIED: lookup failed. Note it and let the brain decide again
+            # (ask for an alternative identifier, or give up) — no caller pause yet.
+            notes.append("System: No record matched those details.")
+            if attempts >= MAX_LOOKUPS:
+                _finalize_verification(ctx, result)
+                return
+            continue
+
+        if action == "give_up" or turn >= MAX_IDENTIFIER_TURNS:
+            _finalize_verification(ctx, {
+                "customer_id": None,
+                "verification_level": "UNVERIFIED",
+                "allowed_actions": [],
+                "failure_reason": "Could not verify the caller.",
+                "customer_data": {},
+            })
+            return
+
+        # action == 'ask': store the question, then PAUSE for the caller's reply.
+        question = decision.get("question") or "Could you share your phone number and date of birth?"
+        ctx.state[f"idf_q_{turn}"] = question
+        yield RequestInput(interrupt_id=f"idf_q_{turn}", message=question)
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +259,7 @@ def escalation_handler(ctx: Context):
     if verification_level == "UNVERIFIED":
         message = (
             "I wasn't able to identify you in our system. "
-            "Could you please provide one of the following?\n"
-            "• Your phone number\n"
-            "• Your policy number\n"
-            "• Your vehicle's license plate"
+            "Please contact our support team so a specialist can assist you."
         )
     elif verification_level == "ESCALATED":
         interrupt_id = f"hitl_escalation_{session_id}"
@@ -174,8 +278,7 @@ def escalation_handler(ctx: Context):
                 interrupt_id=interrupt_id,
                 message=(
                     "⚠️ This account requires human review before proceeding. "
-                    "A specialist will contact you shortly. "
-                    "Reference: " + session_id
+                    "A specialist will contact you shortly. Reference: " + session_id
                 ),
             )
             return
@@ -183,11 +286,7 @@ def escalation_handler(ctx: Context):
     elif intent == "unknown":
         message = (
             "I'm not sure I understood your request. Could you please clarify?\n"
-            "I can help you with:\n"
-            "• Policy questions\n"
-            "• Filing or checking a claim\n"
-            "• Getting a new insurance quote\n"
-            "• Emergency / roadside assistance"
+            "I can help with policy questions, claims, quotes, or emergencies."
         )
     else:
         message = (
@@ -225,7 +324,7 @@ def specialist_router(ctx: Context) -> None:
 # ---------------------------------------------------------------------------
 
 @node(name="action_confirmation", rerun_on_resume=True)
-def action_confirmation(ctx: Context, node_input: str | None = None):
+def action_confirmation(ctx: Context, node_input=None):
     """Risk-gated confirmation before finalising the specialist's response."""
     classification = ctx.state.get("classification", {})
     session_id = ctx.state.get("session_id", "unknown")
@@ -233,14 +332,15 @@ def action_confirmation(ctx: Context, node_input: str | None = None):
     customer_id = ctx.state.get("active_customer_id")
     intent = classification.get("intent", "unknown")
 
-    if risk_level == "LOW":
+    # Emergency is time-critical: never block an SOS behind a human-approval
+    # pause. Auto-proceed (still audited). LOW risk also auto-proceeds.
+    if risk_level == "LOW" or intent == "emergency":
         audit.log_action(
-            session_id=session_id,
-            customer_id=customer_id,
-            action="ACTION_AUTO_APPROVED",
-            intent=intent,
+            session_id=session_id, customer_id=customer_id,
+            action="ACTION_AUTO_APPROVED", intent=intent,
             risk_level=risk_level,
             status="SUCCESS",
+            extra={"emergency_bypass": True} if intent == "emergency" else None,
         )
         return
 
@@ -251,31 +351,25 @@ def action_confirmation(ctx: Context, node_input: str | None = None):
         if risk_level == "MEDIUM":
             yield RequestInput(
                 interrupt_id=interrupt_id,
-                message="Please confirm you want to proceed with this action. Reply 'yes' to confirm or 'no' to cancel.",
+                message="Please confirm you want to proceed. Reply 'yes' to confirm or 'no' to cancel.",
             )
         else:
             yield RequestInput(
                 interrupt_id=interrupt_id,
                 message=(
                     "⚠️ This action requires human approval (HIGH risk). "
-                    "A specialist will review and complete your request. "
-                    f"Reference: {session_id}"
+                    f"A specialist will review and complete your request. Reference: {session_id}"
                 ),
             )
         return
 
     confirmed = str(resume).lower().strip() in ("yes", "y", "confirm", "ok", "proceed")
     status = "SUCCESS" if confirmed else "REJECTED"
-
     audit.log_action(
-        session_id=session_id,
-        customer_id=customer_id,
-        action="ACTION_CONFIRMATION",
-        intent=intent,
-        risk_level=risk_level,
-        status=status,
+        session_id=session_id, customer_id=customer_id,
+        action="ACTION_CONFIRMATION", intent=intent,
+        risk_level=risk_level, status=status,
     )
-
     if not confirmed:
         ctx.output = "Action cancelled. Is there anything else I can help you with?"
 
@@ -287,31 +381,19 @@ def action_confirmation(ctx: Context, node_input: str | None = None):
 root_agent = Workflow(
     name="insurance_bot_workflow",
     description=(
-        "Guardrailed multi-agent insurance bot. "
-        "Sequentially classifies intent (Agent 1), verifies identity (Agent 2), "
-        "then routes to the right specialist with full audit logging."
+        "Guardrailed multi-agent insurance bot. Classifies intent (Agent 1), "
+        "verifies identity (Agent 2), then routes to the right specialist with audit logging."
     ),
     edges=[
-        # Stage 1: classify intent
         (START, intent_classifier),
-
-        # Stage 2: verify identity (sequential after classification)
         (intent_classifier, identification_node),
-
-        # Stage 3: deterministic risk routing
         (identification_node, risk_router),
-
-        # Stage 4a: escalation path
         Edge(from_node=risk_router, to_node=escalation_handler, route="escalate"),
-
-        # Stage 4b: specialist routing
         Edge(from_node=risk_router, to_node=specialist_router, route="proceed"),
         Edge(from_node=specialist_router, to_node=policy_agent, route="policy_question"),
         Edge(from_node=specialist_router, to_node=claims_agent, route="claim"),
         Edge(from_node=specialist_router, to_node=offers_agent, route="offer"),
         Edge(from_node=specialist_router, to_node=emergency_agent, route="emergency"),
-
-        # Stage 5: all specialist agents → confirmation
         (policy_agent, action_confirmation),
         (claims_agent, action_confirmation),
         (offers_agent, action_confirmation),
