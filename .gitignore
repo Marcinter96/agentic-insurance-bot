@@ -44,3 +44,9 @@ env/
 
 # ADK runtime
 .adk/
+
+# Generated mock data (seeded to GCS, not committed)
+data/mock/
+
+# Evaluation reports (generated output)
+evaluation/reports/

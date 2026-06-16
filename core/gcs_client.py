@@ -1,0 +1,78 @@
+import json
+import logging
+from datetime import datetime
+from google.cloud import storage
+from core.config import GCS_BUCKET
+
+logger = logging.getLogger(__name__)
+
+
+class GCSClient:
+    def __init__(self, bucket_name: str = GCS_BUCKET):
+        self._client = storage.Client()
+        self._bucket = self._client.bucket(bucket_name)
+        self._bucket_name = bucket_name
+
+    def _read(self, path: str) -> dict | list | None:
+        try:
+            blob = self._bucket.blob(path)
+            if not blob.exists():
+                return None
+            return json.loads(blob.download_as_string())
+        except Exception as e:
+            logger.error(f"GCS read error [{path}]: {e}")
+            return None
+
+    def _write(self, path: str, data: dict) -> bool:
+        try:
+            blob = self._bucket.blob(path)
+            blob.upload_from_string(json.dumps(data))
+            return True
+        except Exception as e:
+            logger.error(f"GCS write error [{path}]: {e}")
+            return False
+
+    def find_customer_by_phone(self, phone: str) -> dict | None:
+        index = self._read("indexes/phone_to_customer.json")
+        if not index:
+            return None
+        customer_id = index.get(phone)
+        return self.get_customer(customer_id) if customer_id else None
+
+    def find_customer_by_policy(self, policy_number: str) -> dict | None:
+        policy = self._read(f"policies/{policy_number}.json")
+        if not policy:
+            return None
+        return self.get_customer(policy.get("customer_id", ""))
+
+    def find_customer_by_plate(self, plate: str) -> dict | None:
+        index = self._read("indexes/plate_to_customer.json")
+        if not index:
+            return None
+        customer_id = index.get(plate)
+        return self.get_customer(customer_id) if customer_id else None
+
+    def get_customer(self, customer_id: str) -> dict | None:
+        if not customer_id:
+            return None
+        return self._read(f"customers/{customer_id}.json")
+
+    def get_policy(self, policy_id: str) -> dict | None:
+        return self._read(f"policies/{policy_id}.json")
+
+    def get_invoices(self, customer_id: str) -> list[dict]:
+        data = self._read(f"indexes/customer_invoices/{customer_id}.json")
+        return data.get("invoices", []) if data else []
+
+    def get_claims(self, customer_id: str) -> list[dict]:
+        data = self._read(f"indexes/customer_claims/{customer_id}.json")
+        return data.get("claims", []) if data else []
+
+    def log_action(self, action: dict) -> str:
+        ts = datetime.now().isoformat()
+        action["logged_at"] = ts
+        self._write(f"audit_logs/{ts.replace(':', '-')}.json", action)
+        return ts
+
+
+gcs = GCSClient()
