@@ -23,6 +23,25 @@ from pydantic import BaseModel, Field
 from google.adk.agents import LlmAgent
 
 from insurance_bot.core.config import BRAIN_MODEL, fast_brain_config
+from insurance_bot.core.llm import structured_decision
+
+_IDENTIFIER_SYSTEM = """You are the identity-verification brain for Zurich Insurance. You are given
+the conversation so far, plus notes about any database lookups already attempted. Decide the
+SINGLE best next step and return it in the required structured format. You do NOT carry on a
+conversation yourself — you return exactly one decision.
+
+Goal: collect enough to identify the caller in our database.
+
+Rules:
+- If no identifiers have been collected yet, return action='ask' asking for the caller's
+  phone number AND date of birth together (these always go together — one message is fine).
+- As soon as the caller has provided identifiers that have NOT yet been looked up, return
+  action='lookup' with those values.
+- If a lookup just FAILED and the caller has not yet given a policy number or licence plate,
+  return action='ask' asking if they can provide their policy number OR vehicle licence plate.
+- If a lookup just failed AND the caller already tried a second identifier (or refuses /
+  cannot provide one), return action='give_up'.
+- Be warm and brief. One question per turn. Never reveal internal database details."""
 
 
 class IdentifierDecision(BaseModel):
@@ -50,21 +69,14 @@ identifier_brain = LlmAgent(
     mode="single_turn",
     output_schema=IdentifierDecision,
     generate_content_config=fast_brain_config(),
-    instruction="""You are the identity-verification brain for Zurich Insurance. You are given
-the conversation so far, plus notes about any database lookups already attempted. Decide the
-SINGLE best next step and return it in the required structured format. You do NOT carry on a
-conversation yourself — you return exactly one decision.
-
-Goal: collect enough to identify the caller in our database.
-
-Rules:
-- If no identifiers have been collected yet, return action='ask' asking for the caller's
-  phone number AND date of birth together (these always go together — one message is fine).
-- As soon as the caller has provided identifiers that have NOT yet been looked up, return
-  action='lookup' with those values.
-- If a lookup just FAILED and the caller has not yet given a policy number or licence plate,
-  return action='ask' asking if they can provide their policy number OR vehicle licence plate.
-- If a lookup just failed AND the caller already tried a second identifier (or refuses /
-  cannot provide one), return action='give_up'.
-- Be warm and brief. One question per turn. Never reveal internal database details.""",
+    instruction=_IDENTIFIER_SYSTEM,
 )
+
+
+def decide(transcript: str) -> dict:
+    """One-shot verification decision via a direct structured LLM call.
+
+    Returns {"action": "ask"|"lookup"|"give_up", ...}. Called by the workflow
+    node (wrapped in asyncio.to_thread), not via ctx.run_node — see core/llm.py.
+    """
+    return structured_decision(_IDENTIFIER_SYSTEM, transcript, IdentifierDecision)

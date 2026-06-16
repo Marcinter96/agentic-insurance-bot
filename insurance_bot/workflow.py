@@ -32,8 +32,8 @@ from insurance_bot.agents.policy_agent import policy_agent
 from insurance_bot.agents.claims_agent import claims_agent
 from insurance_bot.agents.offers_agent import offers_agent
 from insurance_bot.agents.emergency_agent import emergency_agent
-from insurance_bot.agents.classifier_agent import classifier_brain, build_classification
-from insurance_bot.agents.identifier_agent import identifier_brain
+from insurance_bot.agents import classifier_agent, identifier_agent
+from insurance_bot.agents.classifier_agent import build_classification
 from insurance_bot.core import audit_logger as audit
 from insurance_bot.core import guardrails
 from insurance_bot.core import safety
@@ -205,10 +205,9 @@ async def intent_classifier(ctx: Context, node_input):
 
     transcript, turn = replay_transcript(initial, questions, replies)
 
-    # One-shot brain call for THIS turn (single_turn agent → returns a dict, never waits).
-    decision = await ctx.run_node(
-        classifier_brain, "\n".join(transcript), run_id=f"clf_brain_t{turn}"
-    ) or {}
+    # One-shot brain call for THIS turn — a direct structured LLM call (NOT
+    # ctx.run_node, so the node has no dynamic child to restore on resume).
+    decision = await asyncio.to_thread(classifier_agent.decide, "\n".join(transcript)) or {}
 
     if turn >= MAX_CLASSIFIER_TURNS or decision.get("action") == "done":
         ctx.state["classification"] = build_classification(decision)
@@ -279,9 +278,7 @@ async def identification_node(ctx: Context, node_input=None):
 
     while True:
         brain_input = "\n".join(transcript + notes)
-        decision = await ctx.run_node(
-            identifier_brain, brain_input, run_id=f"idf_brain_t{turn}_a{attempts}"
-        ) or {}
+        decision = await asyncio.to_thread(identifier_agent.decide, brain_input) or {}
         action = decision.get("action")
         logger.info(
             "IDENTIFIER | turn=%s attempts=%s action=%s phone=%s dob=%s policy=%s plate=%s",
