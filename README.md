@@ -1,311 +1,166 @@
 # Agentic Insurance Bot
 
-A production-grade guardrailed multi-agent insurance chatbot built with **Google ADK 2.2.0** and **Gemini 2.5 Flash** on Vertex AI. Uses deterministic workflow routing — not probabilistic LLM delegation — to ensure every customer request is handled safely, auditably, and consistently.
+A guardrailed multi-agent insurance chatbot built with **Google ADK 2.2.0** and **Gemini 2.5 Flash** on Vertex AI.
+
+Every routing decision is **deterministic** (plain Python rules), never probabilistic LLM delegation. The LLM is used only where judgement is genuinely needed — understanding what a caller wants and extracting identifiers — and even there it runs as a stateless "brain" that the workflow drives one turn at a time.
+
+> **New here?** Read the [`docs/`](docs/) folder. It explains the ADK building blocks from first principles and walks through every design choice (including the bugs that shaped them).
 
 ---
+
+## What it does (the happy path)
+
+```
+1. Caller says something vague        "Hi, I need some help."
+2. Bot finds out WHAT they want       → classifier asks ≤4 questions → intent = claim
+3. Bot finds out WHO they are         → identifier asks phone+DOB → GCS lookup → verified
+4. Bot checks the rulebook            → verified + allowed → proceed (else escalate to human)
+5. Bot does the work                  → routes to the claims specialist
+6. Risk gate                          → low risk auto-answers; higher risk asks to confirm / HITL
+```
 
 ## Architecture
 
+Fully **sequential**. The Workflow is a pure orchestrator; the two conversational steps are loops that the workflow itself drives, pausing for the caller between questions.
+
 ```
 USER MESSAGE
-      │
-      ▼
-┌─────────────────────────────────┐
-│  NODE 1: intent_classifier      │  ← Gemini classifies into 4 categories
-│  policy_question / offer /      │    + extracts customer identifiers
-│  claim / emergency / unknown    │
-└──────────────┬──────────────────┘
-               │ parallel fan-out
-    ┌──────────┴───────────┐
-    ▼                      ▼
-NODE 2a                 NODE 2b
-verification_node       audit_logger
-(GCS lookup by          (Cloud Logging —
-phone/policy/plate)     immutable audit trail)
-    │                      │
-    └──────────┬───────────┘
-               ▼
-        ┌─────────────┐
-        │  JoinNode   │  ← waits for both branches
-        └──────┬──────┘
-               ▼
-┌──────────────────────────────────┐
-│  NODE 3: risk_router             │  ← deterministic, no LLM
-│  ESCALATE if: UNVERIFIED /       │
-│    ESCALATED / unknown intent    │
-│  PROCEED if: verified + allowed  │
-└──────────┬───────────────────────────┘
-     ┌─────┴─────┐
-  escalate      proceed
-     │              │
-     ▼              ▼
-NODE 4a         NODE 4b: specialist_router
-escalation_     │
-handler         ├─ policy_question → policy_agent
-(HITL via       ├─ claim          → claims_agent
-RequestInput)   ├─ offer          → offers_agent
-                └─ emergency      → emergency_agent
-                         │
-                         ▼
-                NODE 5: action_confirmation
-                LOW  → auto-approve
-                MED  → user confirms
-                HIGH → HITL pause
+     │
+     ▼
+┌──────────────────────────────────────────────┐
+│ NODE 1  intent_classifier   (loop)            │  ask ⇄ wait, ≤4 turns
+│   workflow owns the loop + the pause          │  brain = one-shot decision: ask / done
+│   writes ctx.state["classification"]          │
+└───────────────────┬──────────────────────────┘
+                    ▼
+┌──────────────────────────────────────────────┐
+│ NODE 2  identification_node (loop)            │  ask ⇄ wait ⇄ GCS lookup
+│   brain decides: ask / lookup / give_up       │  lookup = plain function (guardrails)
+│   writes ctx.state["verification"]            │
+└───────────────────┬──────────────────────────┘
+                    ▼
+┌──────────────────────────────────────────────┐
+│ NODE 3  risk_router   (deterministic, no LLM) │  guardrails.decide_route(...)
+└───────┬───────────────────────────────┬──────┘
+   escalate                         proceed
+        │                                │
+        ▼                                ▼
+NODE 4a escalation_handler     NODE 4b specialist_router (deterministic)
+(HITL via RequestInput)         ├─ policy_question → policy_agent
+                                ├─ claim          → claims_agent
+                                ├─ offer          → offers_agent
+                                └─ emergency      → emergency_agent
+                                         │
+                                         ▼
+                                NODE 5 action_confirmation
+                                LOW → auto · MED → confirm · HIGH → HITL
 ```
 
-### Key Design Decisions
+### The one rule that makes it robust
+
+> **Only the Workflow pauses. The agents never pause** — each is a one-shot brain that, given the conversation so far, returns a single structured decision.
+
+Earlier versions tried to let a multi-turn `mode='task'` agent run the conversation itself. That repeatedly broke on pause/resume (the `No function call event found for function response ids` crash). Moving the loop into the workflow and demoting the agents to one-shot brains removed an entire class of bugs. The full story is in [`docs/03-design-decisions.md`](docs/03-design-decisions.md).
+
+### Key design decisions (summary)
 
 | Decision | Reason |
 |----------|--------|
-| **Workflow + @node** | Deterministic routing — no probabilistic LLM delegation |
-| **Parallel verification + audit** | Speed + instant immutable log before any action |
+| **Workflow + `@node`** | Deterministic routing — no probabilistic LLM delegation |
+| **Workflow owns the conversation loop; agents are one-shot brains** | `RequestInput` is the only mechanism that truly pauses a Workflow; keeps agents un-breakable |
+| **`single_turn` brains with `output_schema`** | Strict structured decisions (ask / done / lookup), no `finish_task` bookkeeping |
+| **Deterministic lookup + rulebook in `guardrails.py`** | Identity and routing are plain Python, shared by text and voice channels |
 | **GCS as single source of truth** | All customer/policy/claim data lives in Cloud Storage |
 | **Risk-based HITL** | Proportional guardrails — HIGH risk always gets human review |
-| **Pydantic I/O schemas** | No hallucinated JSON; strict contracts per node |
-| **Cloud Logging audit trail** | Immutable, queryable, compliance-ready |
+| **Thinking disabled + `to_thread` GCS** | Brains skip Gemini's reasoning pass; blocking I/O kept off the event loop |
 
 ---
 
-## Project Structure
+## Documentation
+
+| Doc | Contents |
+|-----|----------|
+| [docs/01-adk-concepts.md](docs/01-adk-concepts.md) | ADK from first principles: Workflow, FunctionNode, LlmAgent modes, `RequestInput`, `run_node`, replay/resume |
+| [docs/02-architecture.md](docs/02-architecture.md) | How this bot is wired: the node graph, state, the conversation loop pattern |
+| [docs/03-design-decisions.md](docs/03-design-decisions.md) | Every choice and trade-off, including the task-mode bug and the perf tuning |
+| [docs/04-data-and-guardrails.md](docs/04-data-and-guardrails.md) | GCS data model, verification levels, the routing rulebook, audit trail |
+| [docs/05-running-and-ops.md](docs/05-running-and-ops.md) | Setup, env vars, performance knobs, voice mode, troubleshooting |
+
+---
+
+## Project structure
 
 ```
 agentic-insurance-bot/
-├── workflow.py                   # Main orchestration — root_agent = Workflow
-│
-├── agents/
-│   ├── policy_agent.py           # MEDIUM risk: policy docs, coverage, invoices
-│   ├── claims_agent.py           # MEDIUM/HIGH risk: file & check claims
-│   ├── offers_agent.py           # LOW risk: quotes for new products
-│   └── emergency_agent.py        # HIGH priority: SOS, roadside assistance
-│
-├── core/
-│   ├── config.py                 # GCP project, bucket, model env vars
-│   ├── models.py                 # Pydantic schemas
-│   ├── gcs_client.py             # All GCS reads/writes
-│   └── audit_logger.py           # Cloud Logging integration
-│
-├── data/
-│   └── mock_data_generator.py    # Seeds GCS with 100 customers, 300+ policies, etc.
-│
-├── evaluation/
-│   ├── metrics.py                # 6 evaluation metrics
-│   ├── test_scenarios.py         # 30 test cases
-│   └── runner.py                 # HTML report generator
-│
+├── insurance_bot/                # the ADK app (run: `adk web insurance_bot`)
+│   ├── agent.py                  # ADK entry point → re-exports root_agent
+│   ├── workflow.py               # the Workflow: all nodes + the conversation loops
+│   ├── live_agent.py             # voice/bidi mode (ADK_BIDI=1)
+│   ├── agents/
+│   │   ├── classifier_agent.py   # Node 1 brain (single_turn, ask/done)
+│   │   ├── identifier_agent.py   # Node 2 brain (single_turn, ask/lookup/give_up)
+│   │   ├── policy_agent.py       # specialist: policy docs, coverage, invoices
+│   │   ├── claims_agent.py       # specialist: file & check claims
+│   │   ├── offers_agent.py       # specialist: quotes for new products
+│   │   └── emergency_agent.py    # specialist: SOS, roadside assistance
+│   └── core/
+│       ├── config.py             # env vars, model + thinking config
+│       ├── models.py             # Pydantic schemas
+│       ├── gcs_client.py         # all GCS reads/writes (lazy client)
+│       ├── guardrails.py         # verify_customer() + decide_route() (shared, no LLM)
+│       └── audit_logger.py       # audit trail
+├── data/mock_data_generator.py   # seeds the GCS bucket
+├── evaluation/                   # metrics, scenarios, HTML report
+├── bidi_local.py                 # local mic/speaker voice runner
 ├── requirements.txt
 └── Dockerfile
 ```
 
 ---
 
-## GCS Bucket Structure
-
-All data lives in `gs://adk-insurance-demo-data-mi/`:
-
-```
-customers/                    # 100 customer profiles
-policies/                     # 300+ policies
-invoices/                     # 500+ invoices
-claims/                       # ~40 claim records
-vehicle_registrations/        # 50 vehicles
-indexes/
-  ├── phone_to_customer.json  # phone → customer_id lookup
-  ├── plate_to_customer.json  # license plate → customer_id lookup
-  ├── customer_invoices/      # per-customer invoice index
-  └── customer_claims/        # per-customer claims index
-audit_logs/                   # append-only audit trail (written at runtime)
-```
-
----
-
-## Customer Verification
-
-The `verification_node` tries identifiers in this order:
-
-1. **Phone number** → `indexes/phone_to_customer.json`
-2. **Policy number** → `policies/{policy_id}.json`
-3. **License plate** → `indexes/plate_to_customer.json`
-4. **Birthdate** (secondary cross-check against stored record)
-
-### Verification Levels & Allowed Actions
-
-| Level | Condition | Allowed |
-|-------|-----------|--------|
-| `VERIFIED_RETURNING` | Found + birthdate matches + prior activity | All: policy, claim, offer, emergency |
-| `VERIFIED_NEW` | Found + birthdate matches, no prior activity | Read-only: policy, offer, emergency |
-| `ESCALATED` | Found but verification failed / account suspended | None → human review |
-| `UNVERIFIED` | Not found in system | None → ask for identifier |
-
----
-
-## Specialist Agents
-
-| Agent | Risk | Tools | Ownership check |
-|-------|------|-------|----------------|
-| `policy_agent` | MEDIUM | `get_policy_details`, `list_customer_policies`, `get_customer_invoices` | policy_id must be in customer's policy_ids |
-| `claims_agent` | MEDIUM/HIGH | `get_open_claims`, `get_claim_status`, `file_new_claim` | claims indexed by customer_id |
-| `offers_agent` | LOW | `list_available_products`, `get_personalized_quote` | no sensitive data |
-| `emergency_agent` | HIGH priority | `get_emergency_contacts`, `dispatch_roadside_assistance` | always responds immediately |
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- Python 3.11+
-- GCP account with Vertex AI enabled
-- `gcloud` CLI authenticated
-
-### 1. Clone & install
+## Quick start
 
 ```bash
-git clone https://github.com/Marcinter96/agentic-insurance-bot.git
-cd agentic-insurance-bot
-python3.11 -m venv .venv
-source .venv/bin/activate
+# 1. install
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 2. Authenticate with GCP
-
-```bash
-gcloud auth login
+# 2. authenticate with GCP (Vertex AI + GCS)
 gcloud auth application-default login
 gcloud config set project project-72fdf994-e492-4b76-83e
-```
 
-### 3. Create GCS bucket & seed data
-
-```bash
-# Create the bucket (once)
-gsutil mb -l us-central1 gs://adk-insurance-demo-data-mi
-
-# Seed with 100 customers, 300+ policies, 500+ invoices, claims, vehicles
+# 3. seed data (once)
 python data/mock_data_generator.py --bucket adk-insurance-demo-data-mi
-```
 
-**Verify data in GCS:**
-```bash
-gsutil ls gs://adk-insurance-demo-data-mi/
-gsutil ls gs://adk-insurance-demo-data-mi/customers/ | head -5
-```
-Or open the [Cloud Console Storage Browser](https://console.cloud.google.com/storage/browser/adk-insurance-demo-data-mi?project=project-72fdf994-e492-4b76-83e).
-
-### 4. Set environment variables
-
-```bash
+# 4. run — from the repo root
 export GOOGLE_GENAI_USE_VERTEXAI=true
 export GOOGLE_CLOUD_PROJECT=project-72fdf994-e492-4b76-83e
 export GOOGLE_CLOUD_LOCATION=us-central1
 export GCS_BUCKET=adk-insurance-demo-data-mi
+export BRAIN_MODEL=gemini-2.5-flash-lite   # fast classification/extraction
+adk web insurance_bot
 ```
 
-### 5. Start the dev server
+Open **http://127.0.0.1:8000**, pick `insurance_bot`, and try:
 
-```bash
-# Run from the PARENT directory of agentic-insurance-bot/
-cd ..
-GOOGLE_GENAI_USE_VERTEXAI=true \
-GOOGLE_CLOUD_PROJECT=project-72fdf994-e492-4b76-83e \
-GOOGLE_CLOUD_LOCATION=us-central1 \
-GCS_BUCKET=adk-insurance-demo-data-mi \
-adk web agentic-insurance-bot --port 8001
-```
+| Try saying | Expected |
+|------------|----------|
+| `"Hi, I need help"` | classifier asks one question at a time |
+| `"I want to check on a claim"` then phone + DOB | → verified → claims specialist |
+| `"I'm broken down on the highway!"` | → emergency specialist immediately |
+| an unknown phone/DOB | → asks for policy / plate → escalates if still not found |
 
-Open **http://127.0.0.1:8001**
+Full setup, env vars, performance tuning, voice mode and troubleshooting: [docs/05-running-and-ops.md](docs/05-running-and-ops.md).
 
 ---
 
-## Demo Scenarios
-
-Try these messages in the ADK web UI:
-
-| Scenario | Example message | Expected path |
-|----------|----------------|---------------|
-| Policy question | `"What does my car insurance cover? My policy is pol_0001"` | → `policy_agent` |
-| New quote | `"I'd like a quote for home insurance"` | → `offers_agent` |
-| File a claim | `"I had an accident on the E40 yesterday, policy pol_0001"` | → `claims_agent` → confirm |
-| Emergency | `"I'm broken down on the highway near Brussels!"` | → `emergency_agent` |
-| No identifier | `"I have a question about my policy"` | → escalation asks for ID |
-| Wrong birthdate | Phone found but birthdate mismatch | → `ESCALATED` → HITL |
-
----
-
-## Evaluation
-
-```bash
-python -m evaluation.runner --output-report evaluation/reports/report.html
-```
-
-### Targets
-
-| Metric | Target |
-|--------|--------|
-| Routing accuracy | ≥ 95% |
-| Authorization block rate | 100% |
-| Hallucination rate | ≤ 5% |
-| Latency p95 | ≤ 2 000 ms |
-| Audit completeness | 100% |
-| HITL escalation rate | 100% |
-
----
-
-## Deployment to Cloud Run
-
-```bash
-docker build -t agentic-insurance-bot:latest .
-docker tag agentic-insurance-bot:latest \
-  us-central1-docker.pkg.dev/project-72fdf994-e492-4b76-83e/insurance-repo/agentic-insurance-bot:latest
-docker push us-central1-docker.pkg.dev/project-72fdf994-e492-4b76-83e/insurance-repo/agentic-insurance-bot:latest
-
-gcloud run deploy agentic-insurance-bot \
-  --image us-central1-docker.pkg.dev/project-72fdf994-e492-4b76-83e/insurance-repo/agentic-insurance-bot:latest \
-  --platform managed \
-  --region us-central1 \
-  --project project-72fdf994-e492-4b76-83e \
-  --set-env-vars GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=project-72fdf994-e492-4b76-83e,GOOGLE_CLOUD_LOCATION=us-central1,GCS_BUCKET=adk-insurance-demo-data-mi \
-  --allow-unauthenticated
-```
-
----
-
-## Troubleshooting
-
-**Vertex AI permission denied:**
-```bash
-gcloud projects add-iam-policy-binding project-72fdf994-e492-4b76-83e \
-  --member="user:marcourfali@gmail.com" \
-  --role="roles/aiplatform.user"
-```
-
-**GCS bucket not found / data missing:**
-```bash
-gsutil mb -l us-central1 gs://adk-insurance-demo-data-mi
-python data/mock_data_generator.py --bucket adk-insurance-demo-data-mi
-```
-
-**Port 8001 in use:**
-```bash
-lsof -i :8001 | grep LISTEN | awk '{print $2}' | xargs kill -9
-```
-
-**Environment variables not loading:**
-Set them inline on the command — do not rely on `.env` files:
-```bash
-GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=... adk web agentic-insurance-bot --port 8001
-```
-
----
-
-## Tech Stack
+## Tech stack
 
 | Component | Technology |
 |-----------|-----------|
 | Agent framework | Google ADK 2.2.0 |
-| LLM | Gemini 2.5 Flash (Vertex AI) |
+| LLM | Gemini 2.5 Flash / Flash-Lite (Vertex AI) |
 | Data store | Google Cloud Storage |
-| Audit logging | Google Cloud Logging |
 | Deployment | Google Cloud Run |
 | Language | Python 3.11+ |
 | Schemas | Pydantic v2 |
