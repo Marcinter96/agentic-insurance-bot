@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from google.adk.agents import LlmAgent
 
-from insurance_bot.core.config import LLM_MODEL
+from insurance_bot.core.config import BRAIN_MODEL, fast_brain_config
 
 
 class IdentifierDecision(BaseModel):
@@ -46,9 +46,10 @@ class IdentifierDecision(BaseModel):
 
 identifier_brain = LlmAgent(
     name="identifier_brain",
-    model=LLM_MODEL,
+    model=BRAIN_MODEL,
     mode="single_turn",
     output_schema=IdentifierDecision,
+    generate_content_config=fast_brain_config(),
     instruction="""You are the identity-verification brain for Zurich Insurance. You are given
 the conversation so far, plus notes about any database lookups already attempted. Decide the
 SINGLE best next step and return it in the required structured format. You do NOT carry on a

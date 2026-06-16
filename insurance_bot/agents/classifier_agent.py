@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from google.adk.agents import LlmAgent
 
-from insurance_bot.core.config import LLM_MODEL
+from insurance_bot.core.config import BRAIN_MODEL, fast_brain_config
 
 ALLOWED_INTENTS = {"policy_question", "offer", "claim", "emergency", "unknown"}
 
@@ -76,9 +76,10 @@ def build_classification(decision: dict) -> dict:
 
 classifier_brain = LlmAgent(
     name="classifier_brain",
-    model=LLM_MODEL,
+    model=BRAIN_MODEL,
     mode="single_turn",
     output_schema=ClassifierDecision,
+    generate_content_config=fast_brain_config(),
     instruction="""You are the intake brain for Zurich Insurance. You are given the
 conversation so far between the Assistant and the Caller. Decide the SINGLE best next step
 and return it in the required structured format. You do NOT carry on a conversation yourself —

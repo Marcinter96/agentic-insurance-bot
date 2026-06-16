@@ -4,6 +4,26 @@ GCP_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "project-72fdf994-e492-4b76-83e"
 GCP_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 GCS_BUCKET = os.getenv("GCS_BUCKET", "adk-insurance-demo-data-mi")
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+
+# Model used by the one-shot "brains" (classifier / identifier). These do a
+# simple, structured classification/extraction job, so a smaller/faster model
+# is plenty. Default to LLM_MODEL; set BRAIN_MODEL=gemini-2.5-flash-lite for an
+# extra speed bump.
+BRAIN_MODEL = os.getenv("BRAIN_MODEL", LLM_MODEL)
+
+# Gemini 2.5 models "think" before answering, which adds significant latency.
+# For the brains (pick-one-intent / extract-an-identifier) that reasoning pass
+# is wasted, so we disable it by default (thinking_budget=0). Override via env.
+BRAIN_THINKING_BUDGET = int(os.getenv("BRAIN_THINKING_BUDGET", "0"))
+
+
+def fast_brain_config():
+    """GenerateContentConfig for the brains: thinking disabled for low latency."""
+    from google.genai import types
+
+    return types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(thinking_budget=BRAIN_THINKING_BUDGET),
+    )
 USE_VERTEX_AI = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "true").lower() == "true"
 
 # Live / bidirectional (voice) model. Used when ADK_BIDI is enabled so that
