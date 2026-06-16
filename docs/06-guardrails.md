@@ -4,16 +4,18 @@ Guardrails are layered: **common** (cross-cutting, app-wide) and **specific** (a
 
 ---
 
-## Common guardrails — the `GuardrailPlugin`
+## Common guardrails — input node + output callback
 
-A single `BasePlugin` (`core/guardrail_plugin.py`) registered on the `App` in `agent.py`, so it applies to **every** user message and model response — text Workflow *and* voice. ADK loads `app` (with plugins) before `root_agent`.
+> **Why not a plugin?** We first tried an app-wide `BasePlugin` (`before_run_callback` to block input, `after_model_callback` to redact output). It does **not** work for this app: the root agent is a `Workflow`, i.e. a `BaseNode`. ADK's node runtime (`runners.py::_run_node_async`) invokes `before_run_callback` but **ignores its return value**, so a plugin cannot halt a Workflow, and it never invokes the runner-level `after_model` either. The plugin could *detect* but not *enforce*. So enforcement lives in the graph and on the agents.
 
-| Direction | Hook | What it does |
-|-----------|------|--------------|
-| **Input** | `before_run_callback` | Screens the incoming message. On a block it returns a `Content`, which **halts the run** and replies with a fixed safe refusal — Gemini never sees the malicious text. |
-| **Output** | `after_model_callback` | Screens a **specialist** agent's response *before it is finalized* and redacts secrets / payment-card numbers. (A workflow node can't do this — by the time it runs, the text has already streamed to the UI.) |
+| Direction | Where | What it does |
+|-----------|-------|--------------|
+| **Input** | `input_guardrail` **node** (first node, after `START`) | Screens the opening message. On a block it routes to `guardrail_blocked`, a terminal node that emits a fixed safe refusal — the classifier never runs and Gemini never sees the malicious text. |
+| **Output** | `after_model_callback` **on each specialist** (`core/output_guard.py`) | An *agent-level* callback (invoked by the LlmAgent's own LLM flow, so it fires reliably under a Workflow root) screens the specialist's response *before it is finalized* and redacts secrets / payment-card numbers. |
 
-Only the four customer-facing specialists are screened on output; the classifier/identifier brains and the safety brain are not.
+Only the four customer-facing specialists carry the output callback; the classifier/identifier brains and the safety brain are not screened.
+
+> **Known limitation:** the `input_guardrail` node screens the **opening** message. Mid-conversation replies (answers to "what's your phone number?") are not yet screened — that's a planned follow-up (screen the latest reply inside the loop nodes).
 
 ### Hybrid decision logic (`core/safety.py`)
 

@@ -17,24 +17,15 @@
 #
 # Example:
 #   ADK_BIDI=1 adk web insurance_bot --port 8001
-#
-# ADK loads `app` first (App with app-wide plugins), then `root_agent`.
-# We expose an `App` so the GuardrailPlugin (input + output guardrails) applies
-# to whichever root agent is active — text Workflow or voice agent.
-from google.adk.apps import App
-
+# Guardrails are enforced INSIDE the graph (input_guardrail node) and via
+# agent-level after_model_callback on the specialists — NOT via an App plugin.
+# For a Workflow (BaseNode) root, ADK's node runtime does not honor a plugin's
+# before_run early-exit, so a plugin cannot block input; a node can.
 from insurance_bot.core.config import ADK_BIDI
-from insurance_bot.core.guardrail_plugin import GuardrailPlugin
 
 if ADK_BIDI:
     from .live_agent import root_agent
 else:
     from .workflow import root_agent
 
-app = App(
-    name="insurance_bot",
-    root_agent=root_agent,
-    plugins=[GuardrailPlugin()],
-)
-
-__all__ = ["app", "root_agent"]
+__all__ = ["root_agent"]

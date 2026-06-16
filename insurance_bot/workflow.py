@@ -36,6 +36,7 @@ from insurance_bot.agents.classifier_agent import classifier_brain, build_classi
 from insurance_bot.agents.identifier_agent import identifier_brain
 from insurance_bot.core import audit_logger as audit
 from insurance_bot.core import guardrails
+from insurance_bot.core import safety
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,47 @@ def _collect_turns(ctx: Context, prefix: str):
 
 
 # ---------------------------------------------------------------------------
+# NODE 0 — Input guardrail (deterministic-first; brain only for the gray area)
+# ---------------------------------------------------------------------------
+#
+# This is a NODE, not a plugin: for a Workflow (BaseNode) root, ADK does not
+# honor a plugin's before_run early-exit, so the only reliable way to BLOCK an
+# incoming message is to route to a refusal inside the graph.
+
+@node(name="input_guardrail")
+def input_guardrail(ctx: Context, node_input):
+    """Screen the opening message. Block → refusal; allow → continue."""
+    ctx.state.setdefault("session_id", ctx.run_id or str(uuid.uuid4()))
+    text = _content_text(node_input)
+    # Remember the opening message so the classifier still sees it (this node
+    # returns nothing, so it isn't echoed back to the caller).
+    ctx.state.setdefault("first_message", text)
+
+    verdict = safety.screen_input(text)
+    logger.info("INPUT GUARDRAIL | verdict=%s category=%s", verdict["verdict"], verdict.get("category"))
+
+    if verdict["verdict"] == "block":
+        audit.log_action(
+            session_id=ctx.state.get("session_id", "unknown"), customer_id=None,
+            action="INPUT_GUARDRAIL_BLOCK", intent="unknown", risk_level="HIGH",
+            status="BLOCKED", extra={"category": verdict.get("category"),
+                                     "reason": verdict.get("reason")},
+        )
+        logger.warning("INPUT BLOCKED | category=%s", verdict.get("category"))
+        ctx.state["_refusal"] = safety.refusal_message(verdict.get("category", "injection"))
+        ctx.route = "blocked"
+        return
+
+    ctx.route = "ok"
+
+
+@node(name="guardrail_blocked")
+def guardrail_blocked(ctx: Context, node_input=None):
+    """Terminal node: emit the fixed safe refusal for a blocked input."""
+    ctx.output = ctx.state.get("_refusal") or safety.REFUSAL_INJECTION
+
+
+# ---------------------------------------------------------------------------
 # NODE 1 — Intent Classifier (workflow owns the loop; brain answers one turn)
 # ---------------------------------------------------------------------------
 
@@ -108,7 +150,9 @@ async def intent_classifier(ctx: Context, node_input):
     if ctx.state.get("classification"):
         return
 
-    initial = _content_text(node_input)
+    # The opening message arrives via input_guardrail (which returns nothing),
+    # so fall back to the stashed first_message.
+    initial = _content_text(node_input) or ctx.state.get("first_message", "")
     questions, replies = _collect_turns(ctx, "clf")
     transcript, turn = replay_transcript(initial, questions, replies)
 
@@ -385,7 +429,11 @@ root_agent = Workflow(
         "verifies identity (Agent 2), then routes to the right specialist with audit logging."
     ),
     edges=[
-        (START, intent_classifier),
+        # Stage 0: input guardrail — block or continue
+        (START, input_guardrail),
+        Edge(from_node=input_guardrail, to_node=guardrail_blocked, route="blocked"),
+        Edge(from_node=input_guardrail, to_node=intent_classifier, route="ok"),
+
         (intent_classifier, identification_node),
         (identification_node, risk_router),
         Edge(from_node=risk_router, to_node=escalation_handler, route="escalate"),
