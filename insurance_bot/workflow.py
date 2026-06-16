@@ -20,6 +20,7 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 import logging
 
@@ -181,7 +182,10 @@ async def identification_node(ctx: Context, node_input=None):
         action = decision.get("action")
 
         if action == "lookup" and attempts < MAX_LOOKUPS:
-            result = guardrails.verify_customer(
+            # verify_customer does synchronous GCS reads; run it off the event
+            # loop so the blocking network I/O doesn't stall the workflow.
+            result = await asyncio.to_thread(
+                guardrails.verify_customer,
                 phone=decision.get("phone") or None,
                 birthdate=decision.get("birthdate") or None,
                 policy_number=decision.get("policy_number") or None,
