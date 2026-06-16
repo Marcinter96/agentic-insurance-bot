@@ -1,18 +1,28 @@
 """
-Node 1 — Conversational intent classifier.
+Node 1 brain — intent classifier (ONE-SHOT, structured output).
 
-A `mode='task'` LlmAgent that chats with the caller (one question at a time,
-max 4) and, as soon as it knows what they need, calls the `classify` tool to
-record the intent + any identifiers into session state. The workflow's
-`intent_classifier` node dispatches this agent via `ctx.run_node(...)`.
+This is NOT a multi-turn agent. It is a `single_turn` LlmAgent that the
+workflow calls once per conversation turn. Given the conversation so far it
+returns a structured decision: either "ask the caller ONE more question" or
+"I'm done, here is the intent".
+
+The *workflow node* (insurance_bot/workflow.py::intent_classifier) owns the
+loop and the pause-for-the-caller. The brain never waits and never loops —
+that is exactly what keeps it from getting into the broken task-mode states
+(finish_task / `classifier_1` function-response pairing crashes).
 """
 
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
 from google.adk.agents import LlmAgent
-from google.adk.tools.tool_context import ToolContext
 
 from insurance_bot.core.config import LLM_MODEL
 
-_ALLOWED_INTENTS = {"policy_question", "offer", "claim", "emergency", "unknown"}
+ALLOWED_INTENTS = {"policy_question", "offer", "claim", "emergency", "unknown"}
 
 # Deterministic guardrail: risk is DERIVED from intent, never guessed by the LLM.
 _RISK_BY_INTENT = {
@@ -24,72 +34,68 @@ _RISK_BY_INTENT = {
 }
 
 
-def classify(
-    intent: str,
-    sub_intent: str = "",
-    phone: str = "",
-    birthdate: str = "",
-    policy_number: str = "",
-    license_plate: str = "",
-    tool_context: ToolContext = None,
-) -> dict:
-    """Record the caller's classified intent and any identifiers they provided.
+class ClassifierDecision(BaseModel):
+    """The brain's structured answer for a single turn."""
 
-    Call this ONCE you are confident which single thing the caller needs.
+    action: Literal["ask", "done"] = Field(
+        description="'ask' to ask the caller one more question, 'done' once the intent is clear."
+    )
+    question: str = Field(
+        default="",
+        description="The ONE short question to ask next. Required when action='ask'.",
+    )
+    intent: str = Field(
+        default="",
+        description="One of policy_question, offer, claim, emergency, unknown. Required when action='done'.",
+    )
+    sub_intent: str = Field(default="", description="Short free-text detail, e.g. 'check claim status'.")
+    phone: str = Field(default="", description="Caller's phone if mentioned, else ''.")
+    birthdate: str = Field(default="", description="Caller's birthdate YYYY-MM-DD if mentioned, else ''.")
+    policy_number: str = Field(default="", description="Policy number if mentioned, else ''.")
+    license_plate: str = Field(default="", description="Licence plate if mentioned, else ''.")
 
-    Args:
-        intent: One of policy_question, offer, claim, emergency, unknown.
-        sub_intent: Short free-text detail, e.g. "check claim status".
-        phone: Caller's phone number if mentioned, else "".
-        birthdate: Caller's birthdate (YYYY-MM-DD) if mentioned, else "".
-        policy_number: Policy number if mentioned, else "".
-        license_plate: Vehicle licence plate if mentioned, else "".
-    """
-    intent = intent if intent in _ALLOWED_INTENTS else "unknown"
-    risk_level = _RISK_BY_INTENT[intent]
 
-    classification = {
+def build_classification(decision: dict) -> dict:
+    """Turn a brain decision dict into the canonical ctx.state['classification']."""
+    intent = decision.get("intent") or "unknown"
+    if intent not in ALLOWED_INTENTS:
+        intent = "unknown"
+    return {
         "intent": intent,
-        "sub_intent": sub_intent,
-        "risk_level": risk_level,
+        "sub_intent": decision.get("sub_intent", ""),
+        "risk_level": _RISK_BY_INTENT[intent],
         "customer_identifiers": {
-            "phone": phone or None,
-            "birthdate": birthdate or None,
-            "policy_number": policy_number or None,
-            "license_plate": license_plate or None,
+            "phone": decision.get("phone") or None,
+            "birthdate": decision.get("birthdate") or None,
+            "policy_number": decision.get("policy_number") or None,
+            "license_plate": decision.get("license_plate") or None,
         },
         "confidence": 1.0,
     }
 
-    # tool_context is auto-injected by ADK and hidden from the LLM's schema.
-    if tool_context is not None:
-        tool_context.state["classification"] = classification
 
-    return {"status": "classified", "intent": intent, "risk_level": risk_level}
-
-
-classifier_agent = LlmAgent(
-    name="intent_classifier_agent",
+classifier_brain = LlmAgent(
+    name="classifier_brain",
     model=LLM_MODEL,
-    mode="task",
-    tools=[classify],
-    instruction="""You are a warm, concise intake assistant for Zurich Insurance.
-Your only goal is to figure out which ONE of these the caller needs, then call the
-`classify` tool:
+    mode="single_turn",
+    output_schema=ClassifierDecision,
+    instruction="""You are the intake brain for Zurich Insurance. You are given the
+conversation so far between the Assistant and the Caller. Decide the SINGLE best next step
+and return it in the required structured format. You do NOT carry on a conversation yourself —
+you return exactly one decision.
+
+Goal: identify which ONE of these the caller needs:
   • policy_question — questions about an existing policy, coverage, documents, invoices
   • offer — wants a quote or a new product
   • claim — file a new claim or check an existing one
   • emergency — accident, breakdown, urgent SOS
 
-Conversation rules:
-- Greet the caller briefly on your first turn.
-- Ask only ONE short question at a time. NEVER bundle several questions together.
-- Ask at most 4 questions in total. Stop asking the moment the intent is clear.
-- If the caller mentions a phone number, birthdate, policy number, or licence plate,
-  remember it and pass it to `classify`.
-- If it sounds like an emergency (accident, breakdown, danger), do NOT interrogate —
-  classify immediately as `emergency`.
-
-As soon as you know the intent, call `classify(...)` with the intent, a short
-sub_intent, and any identifiers you collected. Do not keep chatting afterwards.""",
+Rules:
+- If the intent is already clear from the conversation, return action='done' with the intent
+  (and any phone / birthdate / policy_number / license_plate the caller has mentioned).
+- Otherwise return action='ask' with ONE short, friendly question that will best narrow it down.
+  Never bundle multiple questions into one.
+- If it sounds like an emergency (accident, breakdown, danger), immediately return
+  action='done' with intent='emergency'. Do not interrogate.
+- If after the conversation you still cannot tell, return action='done' with intent='unknown'.""",
 )
