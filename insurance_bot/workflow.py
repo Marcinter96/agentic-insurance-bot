@@ -265,6 +265,8 @@ async def identification_node(ctx: Context, node_input=None):
         return
 
     questions, replies = _collect_turns(ctx, "idf")
+    logger.info("IDENTIFIER | collected questions=%s replies=%s resume_keys=%s",
+                sorted(questions), sorted(replies), sorted(ctx.resume_inputs.keys()))
 
     # Input guardrail for mid-conversation replies.
     if _reply_blocked(ctx, replies):
@@ -281,6 +283,12 @@ async def identification_node(ctx: Context, node_input=None):
             identifier_brain, brain_input, run_id=f"idf_brain_t{turn}_a{attempts}"
         ) or {}
         action = decision.get("action")
+        logger.info(
+            "IDENTIFIER | turn=%s attempts=%s action=%s phone=%s dob=%s policy=%s plate=%s",
+            turn, attempts, action,
+            bool(decision.get("phone")), bool(decision.get("birthdate")),
+            bool(decision.get("policy_number")), bool(decision.get("license_plate")),
+        )
 
         if action == "lookup" and attempts < MAX_LOOKUPS:
             # verify_customer does synchronous GCS reads; run it off the event
@@ -321,6 +329,7 @@ async def identification_node(ctx: Context, node_input=None):
         # action == 'ask': store the question, then PAUSE for the caller's reply.
         question = decision.get("question") or "Could you share your phone number and date of birth?"
         ctx.state[f"idf_q_{turn}"] = question
+        logger.info("IDENTIFIER | pausing to ask (turn=%s): %s", turn, question[:60])
         yield RequestInput(interrupt_id=f"idf_q_{turn}", message=question)
         return
 
