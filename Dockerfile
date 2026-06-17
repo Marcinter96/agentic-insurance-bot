@@ -1,21 +1,19 @@
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements and install dependencies
+# Install Python dependencies first (better layer caching).
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy agent code
-COPY agent.py .
+# Copy the whole project: the `insurance_bot` package is the agent app, and
+# `adk web .` exposes it as the app named "insurance_bot".
+COPY . .
 
-# Set environment variables (can be overridden by Cloud Run)
+# Vertex AI by default; Cloud Run injects PORT (defaults to 8080).
 ENV GOOGLE_GENAI_USE_VERTEXAI=true
 ENV PORT=8080
-
-# Expose port
 EXPOSE 8080
 
-# Run the ADK web server
-CMD ["adk", "web", ".", "--port", "8080", "--host", "0.0.0.0"]
+# Agents dir = repo root (contains the insurance_bot/ agent package).
+CMD ["sh", "-c", "adk web . --port ${PORT} --host 0.0.0.0"]
