@@ -14,10 +14,11 @@ its state — robust.
 Flow:
   START → intake   (input guardrail → classify → identify; pauses for the caller)
         → risk_router          (deterministic, no LLM)
-            ├─[escalate]→ escalation_handler
-            └─[proceed]→ specialist_router → {policy|claims|offers|emergency}_agent
-                                           → action_confirmation
-  intake ─[blocked]→ guardrail_blocked (safe refusal)
+            ├─[escalate]→ escalation_handler ─→ human_handoff_end
+            └─[proceed]→ specialist_router → {policy|claims|offers}_agent → outcome_router
+                                           → resolved_end | human_handoff_end
+                         specialist_router → sos_handler (emergency) → human_handoff_end
+  intake ─[blocked]→ guardrail_blocked (safe refusal / BLOCKED end)
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 import logging
+from datetime import datetime, timezone
 
 from google.adk import Context
 from google.adk.workflow import Workflow, node, Edge, START
@@ -33,12 +35,14 @@ from google.adk.workflow._function_node import RequestInput
 from insurance_bot.agents.policy_agent import policy_agent
 from insurance_bot.agents.claims_agent import claims_agent
 from insurance_bot.agents.offers_agent import offers_agent
-from insurance_bot.agents.emergency_agent import emergency_agent
 from insurance_bot.agents import classifier_agent, identifier_agent
 from insurance_bot.agents.classifier_agent import build_classification
 from insurance_bot.core import audit_logger as audit
 from insurance_bot.core import guardrails
 from insurance_bot.core import safety
+from insurance_bot.core import outcomes
+from insurance_bot.core import conversation
+from insurance_bot.core.gcs_client import gcs
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +207,14 @@ async def intake(ctx: Context, node_input):
     initial = _content_text(node_input) or ctx.state.get("first_message", "")
     ctx.state.setdefault("first_message", initial)
 
+    # If intake is already done (classification + verification set), this is a
+    # follow-up turn meant for the specialist — record it in the shared transcript
+    # so the specialist sees the full context and doesn't re-greet.
+    if ctx.state.get("classification") and ctx.state.get("verification"):
+        msg = _content_text(node_input)
+        if msg:
+            conversation.record_user(ctx.state, msg)
+
     # ===== PHASE 1: classify intent (main intent → sub-intent) =====
     if not ctx.state.get("classification"):
         clf_q, clf_r = _collect_turns(ctx, "clf")
@@ -224,6 +236,8 @@ async def intake(ctx: Context, node_input):
         if turn >= MAX_CLASSIFIER_TURNS or decision.get("action") == "done":
             ctx.state["classification"] = build_classification(decision)
             c = ctx.state["classification"]
+            # Seed the shared transcript with the caller's original request.
+            conversation.record_user(ctx.state, ctx.state.get("first_message", ""))
             logger.info("CLASSIFICATION | DONE intent=%s sub_intent=%s risk=%s (asked %s question(s))",
                         c["intent"], c["sub_intent"] or "-", c["risk_level"], turn)
             logger.info("HANDOFF | classifier → identifier : %s", HANDOFF_MSG)
@@ -237,6 +251,9 @@ async def intake(ctx: Context, node_input):
             return
 
     # ===== PHASE 2: identify the caller =====
+    # Emergencies are identified too (so the SOS record names the customer); the
+    # difference is that decide_route still lets them PROCEED even if unverified,
+    # so an unidentifiable caller is never blocked from reaching a human.
     if not ctx.state.get("verification"):
         idf_q, idf_r = _collect_turns(ctx, "idf")
         if not idf_q and not idf_r:
@@ -309,8 +326,72 @@ async def intake(ctx: Context, node_input):
 
 @node(name="guardrail_blocked")
 def guardrail_blocked(ctx: Context, node_input=None):
-    """Terminal node: emit the fixed safe refusal for a blocked input."""
+    """Terminal node (BLOCKED end): emit the fixed safe refusal for a blocked input."""
+    ctx.state["resolution"] = outcomes.BLOCKED
     ctx.output = ctx.state.get("_refusal") or safety.REFUSAL_INJECTION
+
+
+# ---------------------------------------------------------------------------
+# SOS Handler — emergency routing to a human (no tools, just message + audit)
+# ---------------------------------------------------------------------------
+
+SOS_MESSAGE = (
+    "Your call is important to us. As this is an emergency, I'm routing you straight "
+    "to a human specialist who can support you right away. Your reference number is {sos_id}. "
+    "If anyone is in immediate danger, please call your local emergency number (112) now."
+)
+
+
+def build_sos_record(state: dict, sos_id: str) -> dict:
+    """Build the SOS interaction record from workflow state (pure / testable).
+
+    Captures a unique id, the customer information we have, and the reason for
+    the call (sub-intent, else the caller's first message)."""
+    verification = state.get("verification", {})
+    classification = state.get("classification", {})
+    reason = (classification.get("sub_intent")
+              or state.get("first_message", "")
+              or "Unspecified emergency")
+    return {
+        "sos_id": sos_id,
+        "session_id": state.get("session_id", "unknown"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "customer": {
+            "customer_id": verification.get("customer_id"),
+            "verification_level": verification.get("verification_level"),
+            "details": verification.get("customer_data", {}),
+        },
+        "reason": reason,
+        "intent": classification.get("intent", "emergency"),
+        "status": "ROUTED_TO_HUMAN",
+    }
+
+
+@node(name="sos_handler", rerun_on_resume=True)
+def sos_handler(ctx: Context, node_input=None):
+    """Emergency path: tell the caller a human is taking over and record the SOS.
+
+    No tools — the SOS agent just (1) speaks a fixed reassurance and (2) writes
+    a record to the `sos_interactions` bucket with a unique id, the customer
+    information we have, and the reason for the call.
+    """
+    ctx.state["resolution"] = outcomes.HUMAN_HANDOFF
+    session_id = ctx.state.get("session_id", "unknown")
+    verification = ctx.state.get("verification", {})
+    sos_id = f"sos_{uuid.uuid4().hex[:10]}"
+    record = build_sos_record(ctx.state, sos_id)
+    reason = record["reason"]
+    written = gcs.log_sos_interaction(record)
+    audit.log_action(
+        session_id=session_id, customer_id=verification.get("customer_id"),
+        action="SOS_INTERACTION", intent="emergency", risk_level="HIGH",
+        status="ROUTED_TO_HUMAN",
+        extra={"sos_id": sos_id, "reason": reason, "persisted": written},
+    )
+    logger.info("SOS | logged interaction sos_id=%s customer=%s persisted=%s reason=%s",
+                sos_id, verification.get("customer_id") or "-", written, reason[:60])
+
+    ctx.output = SOS_MESSAGE.format(sos_id=sos_id)
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +417,7 @@ def risk_router(ctx: Context) -> None:
 @node(name="escalation_handler", rerun_on_resume=True)
 def escalation_handler(ctx: Context):
     """Handle unverified, escalated, or unknown requests — HITL when needed."""
+    ctx.state["resolution"] = outcomes.HUMAN_HANDOFF
     verification = ctx.state.get("verification", {})
     classification = ctx.state.get("classification", {})
     session_id = ctx.state.get("session_id", "unknown")
@@ -406,51 +488,60 @@ def specialist_router(ctx: Context) -> None:
 # Action Confirmation (risk gate before executing)
 # ---------------------------------------------------------------------------
 
-@node(name="action_confirmation", rerun_on_resume=True)
-def action_confirmation(ctx: Context, node_input=None):
-    """Risk-gated confirmation before finalising the specialist's response."""
-    classification = ctx.state.get("classification", {})
-    session_id = ctx.state.get("session_id", "unknown")
-    risk_level = classification.get("risk_level", "LOW")
-    customer_id = ctx.state.get("active_customer_id")
-    intent = classification.get("intent", "unknown")
+# ---------------------------------------------------------------------------
+# Outcome split — two distinct ends: RESOLVED vs HUMAN_HANDOFF
+# ---------------------------------------------------------------------------
 
-    # Emergency is time-critical: never block an SOS behind a human-approval pause.
-    if risk_level == "LOW" or intent == "emergency":
-        audit.log_action(
-            session_id=session_id, customer_id=customer_id,
-            action="ACTION_AUTO_APPROVED", intent=intent, risk_level=risk_level,
-            status="SUCCESS",
-            extra={"emergency_bypass": True} if intent == "emergency" else None,
-        )
+def decide_outcome_route(state) -> str:
+    """Map the conversation's resolution to a terminal route (pure / testable).
+
+    Defaults to RESOLVED when nothing set it (e.g. the customer just declined)."""
+    resolution = state.get("resolution") or outcomes.RESOLVED
+    return outcomes.HUMAN_HANDOFF if resolution == outcomes.HUMAN_HANDOFF else outcomes.RESOLVED
+
+
+@node(name="outcome_router", rerun_on_resume=True)
+def outcome_router(ctx: Context, node_input=None) -> None:
+    """Send the finished conversation to the matching terminal end.
+
+    The specialist tools set ctx.state['resolution']; if none was set (e.g. the
+    customer simply declined an offer), the conversation is treated as RESOLVED."""
+    ctx.route = decide_outcome_route(ctx.state)
+
+
+def _finish(ctx: Context, resolution: str) -> None:
+    """Log the terminal only when the conversation is genuinely over.
+
+    Conversational specialists route to an end on EVERY turn, so a mid-conversation
+    turn arrives here with no explicit resolution set — that's just the turn
+    completing, not the conversation ending. We only emit CONVERSATION_END (and
+    the success/escalation metric) when a tool/handler explicitly set a
+    resolution in state."""
+    if not ctx.state.get("resolution"):
+        logger.info("TURN | complete (conversation continues)")
         return
-
-    interrupt_id = f"confirm_{session_id}"
-    resume = ctx.resume_inputs.get(interrupt_id)
-    if resume is None:
-        if risk_level == "MEDIUM":
-            yield RequestInput(
-                interrupt_id=interrupt_id,
-                message="Please confirm you want to proceed. Reply 'yes' to confirm or 'no' to cancel.",
-            )
-        else:
-            yield RequestInput(
-                interrupt_id=interrupt_id,
-                message=(
-                    "⚠️ This action requires human approval (HIGH risk). "
-                    f"A specialist will review and complete your request. Reference: {session_id}"
-                ),
-            )
-        return
-
-    confirmed = str(resume).lower().strip() in ("yes", "y", "confirm", "ok", "proceed")
-    status = "SUCCESS" if confirmed else "REJECTED"
     audit.log_action(
-        session_id=session_id, customer_id=customer_id,
-        action="ACTION_CONFIRMATION", intent=intent, risk_level=risk_level, status=status,
+        session_id=ctx.state.get("session_id", "unknown"),
+        customer_id=ctx.state.get("active_customer_id")
+        or ctx.state.get("verification", {}).get("customer_id"),
+        action="CONVERSATION_END",
+        intent=ctx.state.get("classification", {}).get("intent", "unknown"),
+        risk_level=ctx.state.get("classification", {}).get("risk_level", "LOW"),
+        status=resolution,
     )
-    if not confirmed:
-        ctx.output = "Action cancelled. Is there anything else I can help you with?"
+    logger.info("END | resolution=%s", resolution)
+
+
+@node(name="resolved_end", rerun_on_resume=True)
+def resolved_end(ctx: Context, node_input=None):
+    """Successful end: the bot achieved the customer's goal. Output already set."""
+    _finish(ctx, outcomes.RESOLVED)
+
+
+@node(name="human_handoff_end", rerun_on_resume=True)
+def human_handoff_end(ctx: Context, node_input=None):
+    """Escalation end: the customer was routed to a human. Output already set."""
+    _finish(ctx, outcomes.HUMAN_HANDOFF)
 
 
 # ---------------------------------------------------------------------------
@@ -473,10 +564,16 @@ root_agent = Workflow(
         Edge(from_node=specialist_router, to_node=policy_agent, route="policy_question"),
         Edge(from_node=specialist_router, to_node=claims_agent, route="claim"),
         Edge(from_node=specialist_router, to_node=offers_agent, route="offer"),
-        Edge(from_node=specialist_router, to_node=emergency_agent, route="emergency"),
-        (policy_agent, action_confirmation),
-        (claims_agent, action_confirmation),
-        (offers_agent, action_confirmation),
-        (emergency_agent, action_confirmation),
+        Edge(from_node=specialist_router, to_node=sos_handler, route="emergency"),
+        # Specialists are conversational; when a turn finishes, classify the
+        # outcome and route to one of the two distinct ends.
+        (policy_agent, outcome_router),
+        (claims_agent, outcome_router),
+        (offers_agent, outcome_router),
+        Edge(from_node=outcome_router, to_node=resolved_end, route="RESOLVED"),
+        Edge(from_node=outcome_router, to_node=human_handoff_end, route="HUMAN_HANDOFF"),
+        # Human-handoff terminals converge on the same escalation end.
+        (escalation_handler, human_handoff_end),
+        (sos_handler, human_handoff_end),
     ],
 )

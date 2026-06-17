@@ -3,7 +3,7 @@ import logging
 import re
 from datetime import datetime
 from google.cloud import storage
-from insurance_bot.core.config import GCS_BUCKET
+from insurance_bot.core.config import GCS_BUCKET, SOS_BUCKET, GCP_LOCATION
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +61,30 @@ class GCSClient:
         self._bucket_name = bucket_name
         self._client = None
         self._bucket = None
+        self._extra_buckets: dict[str, object] = {}
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = storage.Client()
+        return self._client
 
     @property
     def bucket(self):
         if self._bucket is None:
-            self._client = storage.Client()
-            self._bucket = self._client.bucket(self._bucket_name)
+            self._bucket = self.client.bucket(self._bucket_name)
         return self._bucket
+
+    def get_or_create_bucket(self, name: str, location: str = GCP_LOCATION):
+        """Return a bucket handle, creating the bucket if it doesn't exist yet."""
+        if name in self._extra_buckets:
+            return self._extra_buckets[name]
+        bucket = self.client.bucket(name)
+        if not bucket.exists():
+            bucket = self.client.create_bucket(name, location=location)
+            logger.info("GCS | created bucket gs://%s in %s", name, location)
+        self._extra_buckets[name] = bucket
+        return bucket
 
     def _read(self, path: str) -> dict | list | None:
         try:
@@ -86,6 +103,28 @@ class GCSClient:
             return True
         except Exception as e:
             logger.error(f"GCS write error [{path}]: {e}")
+            return False
+
+    def read_from(self, bucket_name: str, path: str) -> dict | list | None:
+        """Read a JSON blob from an arbitrary bucket (e.g. the offer catalog)."""
+        try:
+            blob = self.client.bucket(bucket_name).blob(path)
+            if not blob.exists():
+                return None
+            return json.loads(blob.download_as_string())
+        except Exception as e:
+            logger.error("GCS read error [%s/%s]: %s", bucket_name, path, e)
+            return None
+
+    def write_to(self, bucket_name: str, path: str, data: dict, create: bool = True) -> bool:
+        """Write a JSON blob to an arbitrary bucket, creating the bucket if needed."""
+        try:
+            bucket = self.get_or_create_bucket(bucket_name) if create \
+                else self.client.bucket(bucket_name)
+            bucket.blob(path).upload_from_string(json.dumps(data))
+            return True
+        except Exception as e:
+            logger.error("GCS write error [%s/%s]: %s", bucket_name, path, e)
             return False
 
     def find_customer_by_phone(self, phone: str) -> dict | None:
@@ -116,6 +155,11 @@ class GCSClient:
             return None
         return self._read(f"policies/{policy_id}.json")
 
+    def get_vehicle(self, vehicle_id: str) -> dict | None:
+        if not _safe_id(vehicle_id):
+            return None
+        return self._read(f"vehicle_registrations/{vehicle_id}.json")
+
     def get_invoices(self, customer_id: str) -> list[dict]:
         if not _safe_id(customer_id):
             return []
@@ -127,6 +171,23 @@ class GCSClient:
             return []
         data = self._read(f"indexes/customer_claims/{customer_id}.json")
         return data.get("claims", []) if data else []
+
+    def log_sos_interaction(self, record: dict, bucket_name: str = SOS_BUCKET) -> bool:
+        """Persist an emergency (SOS) interaction to the dedicated SOS bucket.
+
+        The bucket is created on first use if it doesn't exist."""
+        sos_id = record.get("sos_id")
+        if not _safe_id(sos_id or ""):
+            logger.error("SOS | refusing to write record with unsafe sos_id=%r", sos_id)
+            return False
+        try:
+            bucket = self.get_or_create_bucket(bucket_name)
+            bucket.blob(f"{sos_id}.json").upload_from_string(json.dumps(record))
+            logger.info("SOS | wrote gs://%s/%s.json", bucket_name, sos_id)
+            return True
+        except Exception as e:
+            logger.error("SOS | write failed for %s in %s: %s", sos_id, bucket_name, e)
+            return False
 
     def log_action(self, action: dict) -> str:
         ts = datetime.now().isoformat()

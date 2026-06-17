@@ -16,6 +16,7 @@ from google.genai import types
 
 from insurance_bot.core import safety
 from insurance_bot.core import audit_logger as audit
+from insurance_bot.core import conversation
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,14 @@ def output_guardrail_callback(callback_context, llm_response):
     agent = getattr(callback_context, "agent_name", "?")
     logger.info("OUTPUT GUARDRAIL | agent=%s verdict=%s category=%s",
                 agent, verdict["verdict"], verdict.get("category"))
+
+    # Record the assistant turn in the shared transcript so later turns (and
+    # other specialists) have the context of what was already said.
+    final_text = verdict["text"] if verdict["verdict"] != "allow" else text
+    try:
+        conversation.record_assistant(callback_context.state, final_text)
+    except Exception:
+        pass
 
     if verdict["verdict"] == "allow":
         return None

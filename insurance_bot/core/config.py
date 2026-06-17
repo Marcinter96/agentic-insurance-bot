@@ -3,6 +3,13 @@ import os
 GCP_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "project-72fdf994-e492-4b76-83e")
 GCP_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 GCS_BUCKET = os.getenv("GCS_BUCKET", "adk-insurance-demo-data-mi")
+# Dedicated bucket for emergency (SOS) interaction records, kept separate from
+# the demo data so it can have its own retention / access policy.
+SOS_BUCKET = os.getenv("SOS_BUCKET", "adk-insurance-sos-mi")
+# Dedicated bucket holding the sellable product/offer catalog.
+OFFER_BUCKET = os.getenv("OFFER_BUCKET", "adk-insurance-offer-mi")
+# Dedicated bucket for filed claims and claim escalations.
+CLAIMS_BUCKET = os.getenv("CLAIMS_BUCKET", "adk-insurance-claims-mi")
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
 
 # Model used by the one-shot "brains" (classifier / identifier). These do a
