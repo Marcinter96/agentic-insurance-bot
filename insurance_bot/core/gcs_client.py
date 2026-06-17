@@ -105,6 +105,28 @@ class GCSClient:
             logger.error(f"GCS write error [{path}]: {e}")
             return False
 
+    def read_from(self, bucket_name: str, path: str) -> dict | list | None:
+        """Read a JSON blob from an arbitrary bucket (e.g. the offer catalog)."""
+        try:
+            blob = self.client.bucket(bucket_name).blob(path)
+            if not blob.exists():
+                return None
+            return json.loads(blob.download_as_string())
+        except Exception as e:
+            logger.error("GCS read error [%s/%s]: %s", bucket_name, path, e)
+            return None
+
+    def write_to(self, bucket_name: str, path: str, data: dict, create: bool = True) -> bool:
+        """Write a JSON blob to an arbitrary bucket, creating the bucket if needed."""
+        try:
+            bucket = self.get_or_create_bucket(bucket_name) if create \
+                else self.client.bucket(bucket_name)
+            bucket.blob(path).upload_from_string(json.dumps(data))
+            return True
+        except Exception as e:
+            logger.error("GCS write error [%s/%s]: %s", bucket_name, path, e)
+            return False
+
     def find_customer_by_phone(self, phone: str) -> dict | None:
         index = self._read("indexes/phone_to_customer.json")
         customer_id = _lookup_normalized(index, phone, _digits)
