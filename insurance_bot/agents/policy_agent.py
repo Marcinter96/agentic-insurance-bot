@@ -1,14 +1,11 @@
 from google.adk.agents import LlmAgent
 from insurance_bot.core.config import LLM_MODEL
 from insurance_bot.core.output_guard import output_guardrail_callback
+from insurance_bot.core.conversation import with_history
 from insurance_bot.tools.policy_tools import POLICY_TOOLS
 
 
-policy_agent = LlmAgent(
-    name="policy_agent",
-    model=LLM_MODEL,
-    after_model_callback=output_guardrail_callback,
-    instruction="""You are an insurance POLICY specialist helping a customer who has ALREADY
+_POLICY_INSTRUCTION = """You are an insurance POLICY specialist helping a customer who has ALREADY
 been verified. Have a natural conversation to understand what they need and help with:
 - Understanding their coverage (what is and isn't covered)
 - Listing their policies and the vehicles they have insured
@@ -33,6 +30,13 @@ Rules:
   and you must never work around it.
 - Be clear, empathetic, and precise. If a tool returns an error, explain it simply and
   offer to route to a human if needed.
-""",
+"""
+
+
+policy_agent = LlmAgent(
+    name="policy_agent",
+    model=LLM_MODEL,
+    after_model_callback=output_guardrail_callback,
+    instruction=with_history(_POLICY_INSTRUCTION),
     tools=POLICY_TOOLS,
 )

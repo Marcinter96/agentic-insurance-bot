@@ -2,6 +2,7 @@ from google.adk.agents import LlmAgent
 from insurance_bot.core.config import LLM_MODEL
 from insurance_bot.core.gcs_client import gcs
 from insurance_bot.core.output_guard import output_guardrail_callback
+from insurance_bot.core.conversation import with_history
 from insurance_bot.tools.claim_tools import CLAIM_TOOLS
 
 
@@ -18,11 +19,7 @@ def get_claim_status(claim_id: str, customer_id: str) -> dict:
     return {"error": "Claim not found or not owned by this customer."}
 
 
-claims_agent = LlmAgent(
-    name="claims_agent",
-    model=LLM_MODEL,
-    after_model_callback=output_guardrail_callback,
-    instruction="""You are an insurance CLAIMS specialist. Customers filing claims are often
+_CLAIMS_INSTRUCTION = """You are an insurance CLAIMS specialist. Customers filing claims are often
 stressed — be calm, empathetic, and clear.
 
 You can do two things:
@@ -48,6 +45,13 @@ Rules:
   about missing fields, ask for those instead.
 - The customer's ID is already in context — the tools read it for you.
 - Be honest about timelines; never promise a specific claim outcome.
-""",
+"""
+
+
+claims_agent = LlmAgent(
+    name="claims_agent",
+    model=LLM_MODEL,
+    after_model_callback=output_guardrail_callback,
+    instruction=with_history(_CLAIMS_INSTRUCTION),
     tools=[get_open_claims, get_claim_status, *CLAIM_TOOLS],
 )

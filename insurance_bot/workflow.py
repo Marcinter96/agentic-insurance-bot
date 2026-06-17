@@ -40,6 +40,7 @@ from insurance_bot.core import audit_logger as audit
 from insurance_bot.core import guardrails
 from insurance_bot.core import safety
 from insurance_bot.core import outcomes
+from insurance_bot.core import conversation
 from insurance_bot.core.gcs_client import gcs
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,14 @@ async def intake(ctx: Context, node_input):
     initial = _content_text(node_input) or ctx.state.get("first_message", "")
     ctx.state.setdefault("first_message", initial)
 
+    # If intake is already done (classification + verification set), this is a
+    # follow-up turn meant for the specialist — record it in the shared transcript
+    # so the specialist sees the full context and doesn't re-greet.
+    if ctx.state.get("classification") and ctx.state.get("verification"):
+        msg = _content_text(node_input)
+        if msg:
+            conversation.record_user(ctx.state, msg)
+
     # ===== PHASE 1: classify intent (main intent → sub-intent) =====
     if not ctx.state.get("classification"):
         clf_q, clf_r = _collect_turns(ctx, "clf")
@@ -226,6 +235,8 @@ async def intake(ctx: Context, node_input):
         if turn >= MAX_CLASSIFIER_TURNS or decision.get("action") == "done":
             ctx.state["classification"] = build_classification(decision)
             c = ctx.state["classification"]
+            # Seed the shared transcript with the caller's original request.
+            conversation.record_user(ctx.state, ctx.state.get("first_message", ""))
             logger.info("CLASSIFICATION | DONE intent=%s sub_intent=%s risk=%s (asked %s question(s))",
                         c["intent"], c["sub_intent"] or "-", c["risk_level"], turn)
             logger.info("HANDOFF | classifier → identifier : %s", HANDOFF_MSG)

@@ -1,14 +1,11 @@
 from google.adk.agents import LlmAgent
 from insurance_bot.core.config import LLM_MODEL
 from insurance_bot.core.output_guard import output_guardrail_callback
+from insurance_bot.core.conversation import with_history
 from insurance_bot.tools.offer_tools import OFFER_TOOLS
 
 
-offers_agent = LlmAgent(
-    name="offers_agent",
-    model=LLM_MODEL,
-    after_model_callback=output_guardrail_callback,
-    instruction="""You are a friendly, persuasive insurance SALES specialist for Zurich.
+_OFFERS_INSTRUCTION = """You are a friendly, persuasive insurance SALES specialist for Zurich.
 We sell five products: HomeShield (house), AutoGuard (motor), LifeSecure (life),
 PensionPlus (pension), and AssistEverywhere (assistance/travel).
 
@@ -39,6 +36,13 @@ Rules:
 - Quotes are indicative; only a human advisor signs the contract.
 - One clear message at a time. Be warm, never pushy to the point of rudeness.
 - Never invent products, prices, or coverage — only use what the tools return.
-""",
+"""
+
+
+offers_agent = LlmAgent(
+    name="offers_agent",
+    model=LLM_MODEL,
+    after_model_callback=output_guardrail_callback,
+    instruction=with_history(_OFFERS_INSTRUCTION),
     tools=OFFER_TOOLS,
 )
