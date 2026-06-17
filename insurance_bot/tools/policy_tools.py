@@ -10,10 +10,15 @@ downloads) are audit-logged.
 
 from __future__ import annotations
 
-from datetime import date
+import uuid
+from datetime import date, datetime, timezone
 
 from insurance_bot.core.gcs_client import gcs
 from insurance_bot.core import audit_logger as audit
+
+
+def _state(tool_context):
+    return getattr(tool_context, "state", {}) if tool_context is not None else {}
 
 
 def _audit(customer_id: str, action: str, status: str, **extra) -> None:
@@ -116,6 +121,49 @@ def download_policy_document(policy_id: str, customer_id: str) -> dict:
             "note": "This is a temporary secure link, valid for 15 minutes."}
 
 
+def route_policy_to_human(reason: str, tool_context=None) -> dict:
+    """Hand off to a human when the agent can't answer the customer's policy question.
+
+    Use this when the question is outside what the tools can answer, or the
+    customer isn't getting what they need. Audit-logged for follow-up.
+    """
+    state = _state(tool_context)
+    customer_id = state.get("active_customer_id")
+    ref_id = f"pol_esc_{uuid.uuid4().hex[:8]}"
+    audit.log_action(
+        session_id=state.get("session_id", "unknown"), customer_id=customer_id,
+        action="POLICY_ESCALATED", intent="policy_question", risk_level="MEDIUM",
+        status="PENDING_HUMAN_REVIEW",
+        extra={"escalation_id": ref_id, "reason": (reason or "Unspecified").strip(),
+               "created_at": datetime.now(timezone.utc).isoformat()},
+    )
+    return {
+        "escalation_id": ref_id, "status": "PENDING_HUMAN_REVIEW",
+        "message": (
+            "I'm not able to fully answer that one myself, so I've passed it to a human "
+            f"specialist who will follow up with you. Reference: {ref_id}."
+        ),
+    }
+
+
+def close_conversation(satisfied: bool = True, tool_context=None) -> dict:
+    """Close the conversation when the customer's policy questions are answered.
+
+    Call this once the customer says they're satisfied / have no more questions.
+    """
+    state = _state(tool_context)
+    customer_id = state.get("active_customer_id")
+    audit.log_action(
+        session_id=state.get("session_id", "unknown"), customer_id=customer_id,
+        action="POLICY_CONVERSATION_CLOSED", intent="policy_question",
+        risk_level="LOW", status="RESOLVED" if satisfied else "ENDED",
+        extra={"satisfied": bool(satisfied)},
+    )
+    return {"status": "closed", "satisfied": bool(satisfied),
+            "message": "Glad I could help — take care, and reach out any time!"
+                       if satisfied else "Thanks for getting in touch. Have a good day!"}
+
+
 POLICY_TOOLS = [
     list_customer_policies,
     get_policy_details,
@@ -124,4 +172,6 @@ POLICY_TOOLS = [
     get_unpaid_invoices,
     get_renewal_info,
     download_policy_document,
+    route_policy_to_human,
+    close_conversation,
 ]
