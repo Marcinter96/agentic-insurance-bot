@@ -13,7 +13,7 @@ class _Ctx:
 
 @pytest.fixture(autouse=True)
 def _no_gcs(monkeypatch):
-    monkeypatch.setattr(ct.gcs, "_write", lambda path, data: True)
+    monkeypatch.setattr(ct.gcs, "write_to", lambda bucket, path, data, **k: True)
     monkeypatch.setattr(ct.audit, "log_action", lambda **k: "ts")
     yield
 
@@ -87,6 +87,20 @@ def test_finalize_requires_callback_time():
     ctx = _Ctx({"active_customer_id": "cust_005"})
     _answer_all(ctx)
     assert "error" in ct.finalize_claim_with_callback("  ", ctx)
+
+
+def test_records_go_to_dedicated_claims_bucket(monkeypatch):
+    from insurance_bot.core.config import CLAIMS_BUCKET
+    captured = []
+    monkeypatch.setattr(ct.gcs, "write_to",
+                        lambda bucket, path, data, **k: captured.append((bucket, path)) or True)
+    ctx = _Ctx({"active_customer_id": "cust_005"})
+    _answer_all(ctx)
+    ct.finalize_claim_with_callback("Monday", ctx)
+    ct.route_claim_to_human("stuck", ctx)
+    assert all(bucket == CLAIMS_BUCKET for bucket, _ in captured)
+    assert any(path.startswith("claims/") for _, path in captured)
+    assert any(path.startswith("escalations/") for _, path in captured)
 
 
 def test_route_to_human_records_partial():

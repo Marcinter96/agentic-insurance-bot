@@ -21,6 +21,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from insurance_bot.core.config import CLAIMS_BUCKET
 from insurance_bot.core.gcs_client import gcs
 from insurance_bot.core import audit_logger as audit
 
@@ -144,7 +145,7 @@ def finalize_claim_with_callback(preferred_callback_time: str, tool_context=None
         "callback_status": "SCHEDULED",
         **intake,
     }
-    written = gcs._write(f"claims/{claim_id}.json", record)
+    written = gcs.write_to(CLAIMS_BUCKET, f"claims/{claim_id}.json", record)
     audit.log_action(
         session_id=state.get("session_id", "unknown"), customer_id=customer_id,
         action="CLAIM_FILED", intent="claim", risk_level="HIGH", status="SUBMITTED",
@@ -182,7 +183,7 @@ def route_claim_to_human(reason: str, tool_context=None) -> dict:
         "collected_so_far": intake,
         "missing": missing_fields(intake),
     }
-    written = gcs._write(f"claims/{ref_id}.json", record)
+    written = gcs.write_to(CLAIMS_BUCKET, f"escalations/{ref_id}.json", record)
     audit.log_action(
         session_id=state.get("session_id", "unknown"), customer_id=customer_id,
         action="CLAIM_ESCALATED", intent="claim", risk_level="HIGH",
