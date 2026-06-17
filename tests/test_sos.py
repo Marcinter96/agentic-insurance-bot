@@ -64,22 +64,43 @@ def test_sos_record_defaults_when_nothing_known():
 
 # --- persistence path & message --------------------------------------------
 
-def test_log_sos_interaction_writes_to_prefix(monkeypatch):
+class _FakeBlob:
+    def __init__(self, name, sink):
+        self.name = name
+        self._sink = sink
+
+    def upload_from_string(self, data):
+        self._sink["name"] = self.name
+        self._sink["data"] = data
+
+
+class _FakeBucket:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def blob(self, name):
+        return _FakeBlob(name, self._sink)
+
+
+def test_log_sos_interaction_writes_to_dedicated_bucket(monkeypatch):
     client = GCSClient(bucket_name="test-bucket")
     captured = {}
-    monkeypatch.setattr(client, "_write", lambda path, data: captured.update(path=path, data=data) or True)
-    ok = client.log_sos_interaction({"sos_id": "sos_abc123", "reason": "x"})
+    monkeypatch.setattr(client, "get_or_create_bucket",
+                        lambda name, *a, **k: captured.update(bucket=name) or _FakeBucket(captured))
+    ok = client.log_sos_interaction({"sos_id": "sos_abc123", "reason": "x"}, bucket_name="sos-test")
     assert ok is True
-    assert captured["path"] == "sos_interactions/sos_abc123.json"
+    assert captured["bucket"] == "sos-test"
+    assert captured["name"] == "sos_abc123.json"
 
 
 def test_log_sos_interaction_rejects_unsafe_id(monkeypatch):
     client = GCSClient(bucket_name="test-bucket")
-    called = {"write": False}
-    monkeypatch.setattr(client, "_write", lambda path, data: called.update(write=True) or True)
+    called = {"hit": False}
+    monkeypatch.setattr(client, "get_or_create_bucket",
+                        lambda *a, **k: called.update(hit=True) or _FakeBucket({}))
     ok = client.log_sos_interaction({"sos_id": "../escape", "reason": "x"})
     assert ok is False
-    assert called["write"] is False
+    assert called["hit"] is False
 
 
 def test_sos_message_includes_reference_and_112():
