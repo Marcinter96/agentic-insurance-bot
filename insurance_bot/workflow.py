@@ -237,18 +237,10 @@ async def intake(ctx: Context, node_input):
             yield RequestInput(interrupt_id=f"clf_q_{turn}", message=q)
             return
 
-    # ===== EMERGENCY BYPASS: never ask a caller in crisis to verify their ID =====
-    if ctx.state.get("classification", {}).get("intent") == "emergency" \
-            and not ctx.state.get("verification"):
-        ids = ctx.state.get("classification", {}).get("customer_identifiers", {})
-        ctx.state["verification"] = {
-            "customer_id": None, "verification_level": "EMERGENCY_BYPASS",
-            "allowed_actions": [], "failure_reason": None,
-            "customer_data": {k: v for k, v in ids.items() if v},
-        }
-        logger.info("INTAKE | emergency → skipping identification (SOS bypass)")
-
     # ===== PHASE 2: identify the caller =====
+    # Emergencies are identified too (so the SOS record names the customer); the
+    # difference is that decide_route still lets them PROCEED even if unverified,
+    # so an unidentifiable caller is never blocked from reaching a human.
     if not ctx.state.get("verification"):
         idf_q, idf_r = _collect_turns(ctx, "idf")
         if not idf_q and not idf_r:
