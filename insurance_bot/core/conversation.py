@@ -25,11 +25,13 @@ def _append(state, line: str) -> None:
 
 
 def record_user(state, text: str) -> None:
-    _append(state, f"Customer: {text}")
+    if (text or "").strip():
+        _append(state, f"Customer: {text}")
 
 
 def record_assistant(state, text: str) -> None:
-    _append(state, f"Assistant: {text}")
+    if (text or "").strip():
+        _append(state, f"Assistant: {text}")
 
 
 def history_text(state) -> str:
