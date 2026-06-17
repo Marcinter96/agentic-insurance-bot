@@ -53,6 +53,22 @@ A **Workflow conductor** with **specialist sub-agents**, where:
 
 ## Architecture
 
+![w:1050 Full architecture](architecture.png)
+
+<!--
+PLACEHOLDER: export docs/ARCHITECTURE_DIAGRAM.md to docs/architecture.png
+  • paste the Mermaid into https://mermaid.live → Export PNG, save as docs/architecture.png
+  • or:  npm i -g @mermaid-js/mermaid-cli && mmdc -i docs/ARCHITECTURE_DIAGRAM.md -o docs/architecture.png
+If the image is missing, the ASCII overview on the next slide is the fallback.
+-->
+
+- **Deterministic routing** on `intent` + `verification` — never probabilistic LLM delegation
+- Verify-before-tools · ownership-checked tools · input **and** output guardrails · two distinct ends
+
+---
+
+## Architecture — flow (fallback view)
+
 ```
                     ┌─ INPUT GUARDRAIL (block injection/abuse/off-topic)
   START → intake ───┼─ classify intent  (one-shot brain)
@@ -66,7 +82,6 @@ A **Workflow conductor** with **specialist sub-agents**, where:
                      └─→ sos_handler (emergency) ─────────────────────→ human_handoff_end 🤝
 ```
 
-- **Deterministic routing** on `intent` + `verification` — never probabilistic LLM delegation
 - Each specialist has **scoped tools + ownership checks + its own output guardrail**
 
 ---
@@ -126,7 +141,26 @@ Plus structured **audit logs** (Cloud Logging) + **dedicated GCS buckets** for S
 
 <!-- _class: lead -->
 
-## Demo (3 min)
+## 🎥 Live Demo
+
+<!--
+PLACEHOLDER — drop your recording here, then keep ONE of the lines below:
+
+  Marp (renders a real <video> if the file sits next to this deck):
+      ![](demo.mp4)
+
+  PowerPoint export: leave the box below and Insert ▸ Video over it after export.
+  Slides/Keynote: replace the box with your video embed.
+-->
+
+<div style="border:3px dashed #7aa2f7; border-radius:16px; padding:80px 40px; text-align:center; color:#7aa2f7;">
+  ▶️ &nbsp; <b>[ DEMO VIDEO HERE ]</b><br/><br/>
+  <span style="font-size:20px; color:#9aa5ce;">drop <code>demo.mp4</code> next to this deck, or paste a YouTube/Drive link</span>
+</div>
+
+---
+
+## Demo (3 min · live or recorded)
 
 **1. Happy path** — "I have a question about my policy" → verify → answer
 **2. Guardrail** — prompt-injection is **blocked**, not obeyed
