@@ -56,10 +56,9 @@ A **Workflow conductor** with **specialist sub-agents**, where:
 ![w:1050 Full architecture](architecture.png)
 
 <!--
-PLACEHOLDER: export docs/ARCHITECTURE_DIAGRAM.md to docs/architecture.png
-  • paste the Mermaid into https://mermaid.live → Export PNG, save as docs/architecture.png
-  • or:  npm i -g @mermaid-js/mermaid-cli && mmdc -i docs/ARCHITECTURE_DIAGRAM.md -o docs/architecture.png
-If the image is missing, the ASCII overview on the next slide is the fallback.
+PLACEHOLDER: open docs/architecture.drawio in https://app.diagrams.net (draw.io),
+then File ▸ Export as ▸ PNG and save it as docs/architecture.png next to this deck.
+(The ASCII overview on the next slide is the fallback if the image is missing.)
 -->
 
 - **Deterministic routing** on `intent` + `verification` — never probabilistic LLM delegation
@@ -100,6 +99,20 @@ If the image is missing, the ASCII overview on the next slide is the fallback.
 
 ---
 
+## Live Speech (Voice) 🎙️
+
+![w:1050 Live voice session](voice_live.png)
+
+<!--
+PLACEHOLDER: save your voice-session screenshot as docs/voice_live.png next to this deck.
+-->
+
+- Same brains & guardrails, driven by **Gemini 3.1 Live** (bidirectional audio)
+- Real-time: `CUSTOMER` partial transcripts → `TOOL-CALL classify_intent` → identity `SEARCH/VERIFIED` → barge-in `INTERRUPT`
+- The **deterministic guardrail pipeline is reused** — voice is just another channel
+
+---
+
 ## Observability — every step is auditable
 
 ```
@@ -123,51 +136,29 @@ Plus structured **audit logs** (Cloud Logging) + **dedicated GCS buckets** for S
 - **Google ADK 2.2.0** — `Workflow` + `@node` graph, `LlmAgent` specialists
 - **Vertex AI · Gemini 2.5 Flash** — specialists (tool-calling)
 - **Gemini 2.5 Flash-Lite** — intake brains, `thinking_budget=0` for speed
+- **Gemini 3.1 Live** — real-time bidirectional voice channel
 - **Google Cloud Storage** — customer data + dedicated SOS / offer / claims buckets
 - **Cloud Logging** — structured audit trail
 - **Python + pytest** — 46 tests (guardrails, ownership, outcomes, resume)
 
 ---
 
-## Key Learnings (the hard-won ones)
+## Learnings & Issues We Faced
 
 - ⚠️ **LLM "task-mode" agents crash as paused workflow nodes** (`No function call event found for function response ids`). Fix: **one-shot structured-output brains** + the workflow owns the loop.
 - 🔁 **Only the Workflow can pause.** Treat the LLM as a stateless per-turn function; keep all multi-turn state in the graph.
 - 🧭 **Deterministic > probabilistic.** LLM-driven agent delegation isn't auditable or guardrailable — we route on explicit state.
 - 🧱 **Plugins can't halt a Workflow root** — guardrails had to live *inside* the graph.
 - 💬 **Workflow-per-turn ⇒ agents re-greet.** Inject a shared transcript so specialists keep context.
+- 🎙️ **Speech in ADK is complex and still lacks some features** — bidi audio, barge-in and transcription needed extra plumbing around the framework.
 
 ---
 
 <!-- _class: lead -->
 
-## 🎥 Live Demo
+# Demo
 
-<!--
-PLACEHOLDER — drop your recording here, then keep ONE of the lines below:
-
-  Marp (renders a real <video> if the file sits next to this deck):
-      ![](demo.mp4)
-
-  PowerPoint export: leave the box below and Insert ▸ Video over it after export.
-  Slides/Keynote: replace the box with your video embed.
--->
-
-<div style="border:3px dashed #7aa2f7; border-radius:16px; padding:80px 40px; text-align:center; color:#7aa2f7;">
-  ▶️ &nbsp; <b>[ DEMO VIDEO HERE ]</b><br/><br/>
-  <span style="font-size:20px; color:#9aa5ce;">drop <code>demo.mp4</code> next to this deck, or paste a YouTube/Drive link</span>
-</div>
-
----
-
-## Demo (3 min · live or recorded)
-
-**1. Happy path** — "I have a question about my policy" → verify → answer
-**2. Guardrail** — prompt-injection is **blocked**, not obeyed
-**3. Emergency** — SOS → human handoff + record in `sos_interactions` bucket
-**4. The graph & logs** — point at the deterministic routing + audit trail
-
-→ see `docs/DEMO_RUNBOOK.md`
+<!-- Live demo / play the recording here. Step-by-step script: docs/DEMO_RUNBOOK.md -->
 
 ---
 

@@ -1,0 +1,112 @@
+<mxfile host="app.diagrams.net" version="24.0.0">
+  <diagram id="insurance-bot-arch" name="Architecture">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Customer -->
+        <mxCell id="user" value="👤 Customer&#10;(adk web / voice)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1f2937;strokeColor=#7dcfff;fontColor=#ffffff;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="660" y="40" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- INTAKE container -->
+        <mxCell id="intake" value="🟦 INTAKE  ·  single node — owns pause &amp; state" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0f1a2b;strokeColor=#7aa2f7;fontColor=#cdd6f4;fontSize=13;verticalAlign=top;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="540" y="130" width="440" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="ig" value="🛡️ Input Guardrail&#10;rules → safety brain" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#3b1f2b;strokeColor=#f7768e;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="570" y="170" width="180" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="clf" value="🧠 Classifier brain&#10;intent + sub-intent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2a1f3d;strokeColor=#bb9af7;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="570" y="225" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="idf" value="🧠 Identifier brain&#10;collect identifiers" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2a1f3d;strokeColor=#bb9af7;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="570" y="270" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="e_ig_clf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7aa2f7;endArrow=block;" edge="1" parent="1" source="ig" target="clf"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_clf_idf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7aa2f7;endArrow=block;" edge="1" parent="1" source="clf" target="idf"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- routers -->
+        <mxCell id="rr" value="⚙️ risk_router" style="rhombus;whiteSpace=wrap;html=1;fillColor=#1a2b3d;strokeColor=#7aa2f7;fontColor=#cde;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="620" y="360" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="sr" value="⚙️ specialist_router" style="rhombus;whiteSpace=wrap;html=1;fillColor=#1a2b3d;strokeColor=#7aa2f7;fontColor=#cde;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="620" y="450" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="esc" value="🤝 escalation_handler" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2d2a16;strokeColor=#e0af68;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="365" width="180" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="blk" value="⛔ guardrail_blocked&#10;(BLOCKED end)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#301616;strokeColor=#f7768e;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="300" y="215" width="180" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- specialists -->
+        <mxCell id="policy" value="📄 policy_agent&#10;7 read tools + route/close" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#13283a;strokeColor=#7dcfff;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="300" y="560" width="180" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="claims" value="📝 claims_agent&#10;5-question stateful intake" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#13283a;strokeColor=#7dcfff;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="500" y="560" width="180" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="offers" value="💰 offers_agent&#10;catalog · quote · sale" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#13283a;strokeColor=#7dcfff;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="700" y="560" width="180" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="sos" value="🚨 sos_handler&#10;deterministic · no tools" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#3b1f1f;strokeColor=#ff9e64;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="900" y="560" width="180" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- outcome + ends -->
+        <mxCell id="oroute" value="⚙️ outcome_router" style="rhombus;whiteSpace=wrap;html=1;fillColor=#1a2b3d;strokeColor=#7aa2f7;fontColor=#cde;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="500" y="670" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="resolved" value="✅ resolved_end" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#16301f;strokeColor=#9ece6a;fontColor=#ffffff;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="780" width="180" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="human" value="🤝 human_handoff_end" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2d2a16;strokeColor=#e0af68;fontColor=#ffffff;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="640" y="780" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- data + audit -->
+        <mxCell id="data" value="🗄️ GCS · customer data&#10;customers · policies · vehicles&#10;invoices · claims" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#101a2b;strokeColor=#7aa2f7;fontColor=#cde;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="540" width="170" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="sosb" value="🗄️ adk-insurance-sos-mi" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#101a2b;strokeColor=#ff9e64;fontColor=#cde;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="640" width="170" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="offb" value="🗄️ adk-insurance-offer-mi" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#101a2b;strokeColor=#7dcfff;fontColor=#cde;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="700" width="170" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="clmb" value="🗄️ adk-insurance-claims-mi" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#101a2b;strokeColor=#7dcfff;fontColor=#cde;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="760" width="170" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="audit" value="📊 Cloud Logging · Audit trail" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#102018;strokeColor=#9ece6a;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="500" y="880" width="340" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- main edges -->
+        <mxCell id="e_user_intake" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7dcfff;endArrow=block;" edge="1" parent="1" source="user" target="intake"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_intake_blk" value="blocked" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#f7768e;endArrow=block;fontColor=#f7768e;" edge="1" parent="1" source="intake" target="blk"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_intake_rr" value="continue" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7aa2f7;endArrow=block;fontColor=#cde;" edge="1" parent="1" source="intake" target="rr"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_rr_esc" value="escalate" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#e0af68;endArrow=block;fontColor=#e0af68;" edge="1" parent="1" source="rr" target="esc"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_rr_sr" value="proceed" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#9ece6a;endArrow=block;fontColor=#9ece6a;" edge="1" parent="1" source="rr" target="sr"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_sr_policy" value="policy" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7aa2f7;endArrow=block;fontColor=#cde;" edge="1" parent="1" source="sr" target="policy"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_sr_claims" value="claim" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7aa2f7;endArrow=block;fontColor=#cde;" edge="1" parent="1" source="sr" target="claims"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_sr_offers" value="offer" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7aa2f7;endArrow=block;fontColor=#cde;" edge="1" parent="1" source="sr" target="offers"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_sr_sos" value="emergency" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#ff9e64;endArrow=block;fontColor=#ff9e64;" edge="1" parent="1" source="sr" target="sos"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_policy_or" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7aa2f7;endArrow=block;" edge="1" parent="1" source="policy" target="oroute"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_claims_or" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7aa2f7;endArrow=block;" edge="1" parent="1" source="claims" target="oroute"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_offers_or" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7aa2f7;endArrow=block;" edge="1" parent="1" source="offers" target="oroute"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_or_res" value="RESOLVED" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#9ece6a;endArrow=block;fontColor=#9ece6a;" edge="1" parent="1" source="oroute" target="resolved"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_or_hum" value="HUMAN_HANDOFF" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#e0af68;endArrow=block;fontColor=#e0af68;" edge="1" parent="1" source="oroute" target="human"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_sos_hum" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#e0af68;endArrow=block;" edge="1" parent="1" source="sos" target="human"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_esc_hum" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#e0af68;endArrow=block;" edge="1" parent="1" source="esc" target="human"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- data edges (dashed) -->
+        <mxCell id="e_idf_data" value="verify" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;strokeColor=#7aa2f7;endArrow=open;fontColor=#7aa2f7;" edge="1" parent="1" source="idf" target="data"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_policy_data" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;strokeColor=#7aa2f7;endArrow=open;" edge="1" parent="1" source="policy" target="data"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_sos_sosb" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;strokeColor=#ff9e64;endArrow=open;" edge="1" parent="1" source="sos" target="sosb"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_offers_offb" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;strokeColor=#7dcfff;endArrow=open;" edge="1" parent="1" source="offers" target="offb"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_claims_clmb" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;strokeColor=#7dcfff;endArrow=open;" edge="1" parent="1" source="claims" target="clmb"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
