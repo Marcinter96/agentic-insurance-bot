@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 
 from insurance_bot.core.gcs_client import gcs
 from insurance_bot.core import audit_logger as audit
+from insurance_bot.core import outcomes
 
 
 def _state(tool_context):
@@ -128,6 +129,7 @@ def route_policy_to_human(reason: str, tool_context=None) -> dict:
     customer isn't getting what they need. Audit-logged for follow-up.
     """
     state = _state(tool_context)
+    state["resolution"] = outcomes.HUMAN_HANDOFF
     customer_id = state.get("active_customer_id")
     ref_id = f"pol_esc_{uuid.uuid4().hex[:8]}"
     audit.log_action(
@@ -152,6 +154,7 @@ def close_conversation(satisfied: bool = True, tool_context=None) -> dict:
     Call this once the customer says they're satisfied / have no more questions.
     """
     state = _state(tool_context)
+    state["resolution"] = outcomes.RESOLVED
     customer_id = state.get("active_customer_id")
     audit.log_action(
         session_id=state.get("session_id", "unknown"), customer_id=customer_id,

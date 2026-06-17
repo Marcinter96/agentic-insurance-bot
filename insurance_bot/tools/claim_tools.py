@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from insurance_bot.core.config import CLAIMS_BUCKET
 from insurance_bot.core.gcs_client import gcs
 from insurance_bot.core import audit_logger as audit
+from insurance_bot.core import outcomes
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,7 @@ def finalize_claim_with_callback(preferred_callback_time: str, tool_context=None
     if not (preferred_callback_time or "").strip():
         return {"error": "Please provide a preferred callback time."}
 
+    state["resolution"] = outcomes.RESOLVED
     customer_id = state.get("active_customer_id")
     claim_id = f"clm_{uuid.uuid4().hex[:8]}"
     record = {
@@ -171,6 +173,7 @@ def route_claim_to_human(reason: str, tool_context=None) -> dict:
     or won't provide all required answers.
     """
     state = _state(tool_context)
+    state["resolution"] = outcomes.HUMAN_HANDOFF
     intake = dict(state.get("claim_intake") or {})
     customer_id = state.get("active_customer_id")
     ref_id = f"clm_esc_{uuid.uuid4().hex[:8]}"

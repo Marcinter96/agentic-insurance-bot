@@ -19,6 +19,7 @@ from datetime import date, datetime, timezone
 from insurance_bot.core.config import OFFER_BUCKET
 from insurance_bot.core.gcs_client import gcs
 from insurance_bot.core import audit_logger as audit
+from insurance_bot.core import outcomes
 from insurance_bot.data.offer_catalog import OFFER_CATALOG, CATALOG_BY_CATEGORY, CATALOG_BY_ID
 
 logger = logging.getLogger(__name__)
@@ -134,11 +135,14 @@ def quote_offer(product: str, customer_id: str) -> dict:
     }
 
 
-def request_human_handoff_to_sign(customer_id: str, product: str) -> dict:
+def request_human_handoff_to_sign(customer_id: str, product: str, tool_context=None) -> dict:
     """Customer wants to sign: record a sales lead and hand off to a human advisor."""
     p = _find_product(product)
     if not p:
         return {"error": f"We don't currently offer '{product}'."}
+    # A closed sale is a SUCCESS — a human only finalises the paperwork.
+    if tool_context is not None:
+        tool_context.state["resolution"] = outcomes.RESOLVED
     lead_id = f"lead_{uuid.uuid4().hex[:10]}"
     record = {
         "lead_id": lead_id,

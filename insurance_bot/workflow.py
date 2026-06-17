@@ -39,6 +39,7 @@ from insurance_bot.agents.classifier_agent import build_classification
 from insurance_bot.core import audit_logger as audit
 from insurance_bot.core import guardrails
 from insurance_bot.core import safety
+from insurance_bot.core import outcomes
 from insurance_bot.core.gcs_client import gcs
 
 logger = logging.getLogger(__name__)
@@ -313,7 +314,8 @@ async def intake(ctx: Context, node_input):
 
 @node(name="guardrail_blocked")
 def guardrail_blocked(ctx: Context, node_input=None):
-    """Terminal node: emit the fixed safe refusal for a blocked input."""
+    """Terminal node (BLOCKED end): emit the fixed safe refusal for a blocked input."""
+    ctx.state["resolution"] = outcomes.BLOCKED
     ctx.output = ctx.state.get("_refusal") or safety.REFUSAL_INJECTION
 
 
@@ -361,6 +363,7 @@ def sos_handler(ctx: Context, node_input=None):
     a record to the `sos_interactions` bucket with a unique id, the customer
     information we have, and the reason for the call.
     """
+    ctx.state["resolution"] = outcomes.HUMAN_HANDOFF
     session_id = ctx.state.get("session_id", "unknown")
     verification = ctx.state.get("verification", {})
     sos_id = f"sos_{uuid.uuid4().hex[:10]}"
@@ -402,6 +405,7 @@ def risk_router(ctx: Context) -> None:
 @node(name="escalation_handler", rerun_on_resume=True)
 def escalation_handler(ctx: Context):
     """Handle unverified, escalated, or unknown requests — HITL when needed."""
+    ctx.state["resolution"] = outcomes.HUMAN_HANDOFF
     verification = ctx.state.get("verification", {})
     classification = ctx.state.get("classification", {})
     session_id = ctx.state.get("session_id", "unknown")
@@ -520,6 +524,52 @@ def action_confirmation(ctx: Context, node_input=None):
 
 
 # ---------------------------------------------------------------------------
+# Outcome split — two distinct ends: RESOLVED vs HUMAN_HANDOFF
+# ---------------------------------------------------------------------------
+
+def decide_outcome_route(state) -> str:
+    """Map the conversation's resolution to a terminal route (pure / testable).
+
+    Defaults to RESOLVED when nothing set it (e.g. the customer just declined)."""
+    resolution = state.get("resolution") or outcomes.RESOLVED
+    return outcomes.HUMAN_HANDOFF if resolution == outcomes.HUMAN_HANDOFF else outcomes.RESOLVED
+
+
+@node(name="outcome_router", rerun_on_resume=True)
+def outcome_router(ctx: Context, node_input=None) -> None:
+    """Send the finished conversation to the matching terminal end.
+
+    The specialist tools set ctx.state['resolution']; if none was set (e.g. the
+    customer simply declined an offer), the conversation is treated as RESOLVED."""
+    ctx.route = decide_outcome_route(ctx.state)
+
+
+def _log_end(ctx: Context, resolution: str) -> None:
+    audit.log_action(
+        session_id=ctx.state.get("session_id", "unknown"),
+        customer_id=ctx.state.get("active_customer_id")
+        or ctx.state.get("verification", {}).get("customer_id"),
+        action="CONVERSATION_END",
+        intent=ctx.state.get("classification", {}).get("intent", "unknown"),
+        risk_level=ctx.state.get("classification", {}).get("risk_level", "LOW"),
+        status=resolution,
+    )
+    logger.info("END | resolution=%s", resolution)
+
+
+@node(name="resolved_end", rerun_on_resume=True)
+def resolved_end(ctx: Context, node_input=None):
+    """Successful end: the bot achieved the customer's goal. Output already set."""
+    _log_end(ctx, outcomes.RESOLVED)
+
+
+@node(name="human_handoff_end", rerun_on_resume=True)
+def human_handoff_end(ctx: Context, node_input=None):
+    """Escalation end: the customer was routed to a human. Output already set."""
+    _log_end(ctx, outcomes.HUMAN_HANDOFF)
+
+
+# ---------------------------------------------------------------------------
 # Build the Workflow
 # ---------------------------------------------------------------------------
 
@@ -543,5 +593,12 @@ root_agent = Workflow(
         (policy_agent, action_confirmation),
         (claims_agent, action_confirmation),
         (offers_agent, action_confirmation),
+        # Specialists finish → classify the outcome → one of two distinct ends.
+        (action_confirmation, outcome_router),
+        Edge(from_node=outcome_router, to_node=resolved_end, route="RESOLVED"),
+        Edge(from_node=outcome_router, to_node=human_handoff_end, route="HUMAN_HANDOFF"),
+        # Human-handoff terminals converge on the same escalation end.
+        (escalation_handler, human_handoff_end),
+        (sos_handler, human_handoff_end),
     ],
 )
