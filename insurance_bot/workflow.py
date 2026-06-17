@@ -42,9 +42,14 @@ from insurance_bot.core import safety
 
 logger = logging.getLogger(__name__)
 
-MAX_CLASSIFIER_TURNS = 4   # at most 4 questions to find the intent
+MAX_CLASSIFIER_TURNS = 4   # at most 4 questions to find the intent + sub-intent
 MAX_IDENTIFIER_TURNS = 4   # at most 4 questions to identify the caller
 MAX_LOOKUPS = 2            # phone+birthdate, then policy/plate
+
+# Spoken once, the moment the classifier is satisfied, just before identity check.
+HANDOFF_MSG = (
+    "Thank you — we've understood your request and will process it as fast as possible."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +186,10 @@ def _finalize_verification(ctx: Context, verification: dict) -> None:
         risk_level=classification.get("risk_level", "LOW"),
         status="INITIATED",
     )
-    logger.info("VERIFICATION | level=%s customer=%s",
-                verification.get("verification_level"), verification.get("customer_id"))
+    identified = verification.get("customer_id") is not None
+    logger.info("IDENTITY SAVED | identified=%s customer_id=%s level=%s",
+                identified, verification.get("customer_id") or "-",
+                verification.get("verification_level"))
 
 
 # ---------------------------------------------------------------------------
@@ -196,12 +203,13 @@ async def intake(ctx: Context, node_input):
     initial = _content_text(node_input) or ctx.state.get("first_message", "")
     ctx.state.setdefault("first_message", initial)
 
-    # ===== PHASE 1: classify intent =====
+    # ===== PHASE 1: classify intent (main intent → sub-intent) =====
     if not ctx.state.get("classification"):
         clf_q, clf_r = _collect_turns(ctx, "clf")
 
         # Input guardrail: opening message on the first turn, latest reply after.
         if not clf_q and not clf_r:
+            logger.info("INTAKE | phase=classify (start)")
             if _blocked(ctx, initial, "opening"):
                 return
         elif clf_r and _blocked(ctx, clf_r[max(clf_r)], "clf_reply"):
@@ -209,11 +217,16 @@ async def intake(ctx: Context, node_input):
 
         transcript, turn = replay_transcript(initial, clf_q, clf_r)
         decision = await asyncio.to_thread(classifier_agent.decide, "\n".join(transcript)) or {}
+        logger.info("CLASSIFIER | turn=%s action=%s intent=%s sub_intent=%s",
+                    turn, decision.get("action"), decision.get("intent") or "-",
+                    decision.get("sub_intent") or "-")
 
         if turn >= MAX_CLASSIFIER_TURNS or decision.get("action") == "done":
             ctx.state["classification"] = build_classification(decision)
             c = ctx.state["classification"]
-            logger.info("CLASSIFICATION | intent=%s risk=%s", c["intent"], c["risk_level"])
+            logger.info("CLASSIFICATION | DONE intent=%s sub_intent=%s risk=%s (asked %s question(s))",
+                        c["intent"], c["sub_intent"] or "-", c["risk_level"], turn)
+            logger.info("HANDOFF | classifier → identifier : %s", HANDOFF_MSG)
             # fall through to PHASE 2 in the same invocation
         else:
             q = decision.get("question") or "Could you tell me a little more about what you need?"
@@ -226,6 +239,8 @@ async def intake(ctx: Context, node_input):
     # ===== PHASE 2: identify the caller =====
     if not ctx.state.get("verification"):
         idf_q, idf_r = _collect_turns(ctx, "idf")
+        if not idf_q and not idf_r:
+            logger.info("INTAKE | phase=identify (start)")
         logger.info("IDENTIFIER | collected q=%s r=%s resume=%s",
                     sorted(idf_q), sorted(idf_r), sorted(ctx.resume_inputs.keys()))
 
@@ -277,6 +292,11 @@ async def intake(ctx: Context, node_input):
                 break
 
             q = decision.get("question") or "Could you share your phone number and date of birth?"
+            # First identity question: lead with the handoff confirmation so the caller
+            # hears the request was understood before we switch to verifying them.
+            if not ctx.state.get("_handoff_greeted"):
+                q = f"{HANDOFF_MSG} {q}"
+                ctx.state["_handoff_greeted"] = True
             q = _screen_question(ctx, q, "idf", turn)
             ctx.state[f"idf_q_{turn}"] = q
             logger.info("IDENTIFIER | pausing to ask (turn=%s): %s", turn, q[:60])
@@ -378,6 +398,7 @@ def specialist_router(ctx: Context) -> None:
     customer_id = ctx.state.get("verification", {}).get("customer_id")
     ctx.state["active_customer_id"] = customer_id
     ctx.route = intent
+    logger.info("HANDOFF | identifier → %s_agent (customer=%s)", intent, customer_id or "-")
     logger.info("SPECIALIST_ROUTE | %s → %s", customer_id, intent)
 
 
