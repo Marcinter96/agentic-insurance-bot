@@ -14,10 +14,11 @@ its state — robust.
 Flow:
   START → intake   (input guardrail → classify → identify; pauses for the caller)
         → risk_router          (deterministic, no LLM)
-            ├─[escalate]→ escalation_handler
-            └─[proceed]→ specialist_router → {policy|claims|offers|emergency}_agent
-                                           → action_confirmation
-  intake ─[blocked]→ guardrail_blocked (safe refusal)
+            ├─[escalate]→ escalation_handler ─→ human_handoff_end
+            └─[proceed]→ specialist_router → {policy|claims|offers}_agent → outcome_router
+                                           → resolved_end | human_handoff_end
+                         specialist_router → sos_handler (emergency) → human_handoff_end
+  intake ─[blocked]→ guardrail_blocked (safe refusal / BLOCKED end)
 """
 
 from __future__ import annotations
@@ -487,53 +488,6 @@ def specialist_router(ctx: Context) -> None:
 # Action Confirmation (risk gate before executing)
 # ---------------------------------------------------------------------------
 
-@node(name="action_confirmation", rerun_on_resume=True)
-def action_confirmation(ctx: Context, node_input=None):
-    """Risk-gated confirmation before finalising the specialist's response."""
-    classification = ctx.state.get("classification", {})
-    session_id = ctx.state.get("session_id", "unknown")
-    risk_level = classification.get("risk_level", "LOW")
-    customer_id = ctx.state.get("active_customer_id")
-    intent = classification.get("intent", "unknown")
-
-    # Emergency is time-critical: never block an SOS behind a human-approval pause.
-    if risk_level == "LOW" or intent == "emergency":
-        audit.log_action(
-            session_id=session_id, customer_id=customer_id,
-            action="ACTION_AUTO_APPROVED", intent=intent, risk_level=risk_level,
-            status="SUCCESS",
-            extra={"emergency_bypass": True} if intent == "emergency" else None,
-        )
-        return
-
-    interrupt_id = f"confirm_{session_id}"
-    resume = ctx.resume_inputs.get(interrupt_id)
-    if resume is None:
-        if risk_level == "MEDIUM":
-            yield RequestInput(
-                interrupt_id=interrupt_id,
-                message="Please confirm you want to proceed. Reply 'yes' to confirm or 'no' to cancel.",
-            )
-        else:
-            yield RequestInput(
-                interrupt_id=interrupt_id,
-                message=(
-                    "⚠️ This action requires human approval (HIGH risk). "
-                    f"A specialist will review and complete your request. Reference: {session_id}"
-                ),
-            )
-        return
-
-    confirmed = str(resume).lower().strip() in ("yes", "y", "confirm", "ok", "proceed")
-    status = "SUCCESS" if confirmed else "REJECTED"
-    audit.log_action(
-        session_id=session_id, customer_id=customer_id,
-        action="ACTION_CONFIRMATION", intent=intent, risk_level=risk_level, status=status,
-    )
-    if not confirmed:
-        ctx.output = "Action cancelled. Is there anything else I can help you with?"
-
-
 # ---------------------------------------------------------------------------
 # Outcome split — two distinct ends: RESOLVED vs HUMAN_HANDOFF
 # ---------------------------------------------------------------------------
@@ -555,7 +509,17 @@ def outcome_router(ctx: Context, node_input=None) -> None:
     ctx.route = decide_outcome_route(ctx.state)
 
 
-def _log_end(ctx: Context, resolution: str) -> None:
+def _finish(ctx: Context, resolution: str) -> None:
+    """Log the terminal only when the conversation is genuinely over.
+
+    Conversational specialists route to an end on EVERY turn, so a mid-conversation
+    turn arrives here with no explicit resolution set — that's just the turn
+    completing, not the conversation ending. We only emit CONVERSATION_END (and
+    the success/escalation metric) when a tool/handler explicitly set a
+    resolution in state."""
+    if not ctx.state.get("resolution"):
+        logger.info("TURN | complete (conversation continues)")
+        return
     audit.log_action(
         session_id=ctx.state.get("session_id", "unknown"),
         customer_id=ctx.state.get("active_customer_id")
@@ -571,13 +535,13 @@ def _log_end(ctx: Context, resolution: str) -> None:
 @node(name="resolved_end", rerun_on_resume=True)
 def resolved_end(ctx: Context, node_input=None):
     """Successful end: the bot achieved the customer's goal. Output already set."""
-    _log_end(ctx, outcomes.RESOLVED)
+    _finish(ctx, outcomes.RESOLVED)
 
 
 @node(name="human_handoff_end", rerun_on_resume=True)
 def human_handoff_end(ctx: Context, node_input=None):
     """Escalation end: the customer was routed to a human. Output already set."""
-    _log_end(ctx, outcomes.HUMAN_HANDOFF)
+    _finish(ctx, outcomes.HUMAN_HANDOFF)
 
 
 # ---------------------------------------------------------------------------
@@ -601,11 +565,11 @@ root_agent = Workflow(
         Edge(from_node=specialist_router, to_node=claims_agent, route="claim"),
         Edge(from_node=specialist_router, to_node=offers_agent, route="offer"),
         Edge(from_node=specialist_router, to_node=sos_handler, route="emergency"),
-        (policy_agent, action_confirmation),
-        (claims_agent, action_confirmation),
-        (offers_agent, action_confirmation),
-        # Specialists finish → classify the outcome → one of two distinct ends.
-        (action_confirmation, outcome_router),
+        # Specialists are conversational; when a turn finishes, classify the
+        # outcome and route to one of the two distinct ends.
+        (policy_agent, outcome_router),
+        (claims_agent, outcome_router),
+        (offers_agent, outcome_router),
         Edge(from_node=outcome_router, to_node=resolved_end, route="RESOLVED"),
         Edge(from_node=outcome_router, to_node=human_handoff_end, route="HUMAN_HANDOFF"),
         # Human-handoff terminals converge on the same escalation end.
