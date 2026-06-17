@@ -22,6 +22,17 @@ CHANNELS = 1
 DTYPE = "int16"
 BLOCKSIZE = 1_600            # ~100 ms at 16 kHz
 
+# Acoustic echo cancellation (remove the bot's own speaker output from the mic
+# so it doesn't hear itself and false-trigger barge-in). The NLMS filter tap
+# window (AEC_FILTER_MS) must exceed the measured speaker->mic delay
+# (~70-95 ms; see `python -m voice_live.aec_probe`), so it absorbs the delay
+# and we don't depend on a precise delay constant. Verify cancellation with
+# `python -m voice_live.aec_verify`.
+AEC_ENABLED = True
+AEC_FILTER_MS = 300.0
+AEC_MU = 0.7
+AEC_DTD_THRESHOLD = 1.0
+
 # Logging level (NOT taken from env — hardcoded for now).
 LOG_LEVEL = "INFO"  # DEBUG | INFO | WARNING | ERROR
 
