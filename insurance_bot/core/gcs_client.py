@@ -116,6 +116,11 @@ class GCSClient:
             return None
         return self._read(f"policies/{policy_id}.json")
 
+    def get_vehicle(self, vehicle_id: str) -> dict | None:
+        if not _safe_id(vehicle_id):
+            return None
+        return self._read(f"vehicle_registrations/{vehicle_id}.json")
+
     def get_invoices(self, customer_id: str) -> list[dict]:
         if not _safe_id(customer_id):
             return []
