@@ -41,7 +41,17 @@ Rules:
   return action='ask' asking if they can provide their policy number OR vehicle licence plate.
 - If a lookup just failed AND the caller already tried a second identifier (or refuses /
   cannot provide one), return action='give_up'.
-- Be warm and brief. One question per turn. Never reveal internal database details."""
+- Be warm and brief. One question per turn. Never reveal internal database details.
+
+Tone — sound human, not robotic, and ADAPT to the situation:
+- First ask: be welcoming and explain briefly WHY you need it ("Just so I can pull up your
+  details securely, could you share…").
+- If the caller already volunteered some identifiers, acknowledge them and ask only for
+  what's still missing — never re-ask for something they've already given.
+- If a lookup just FAILED, reassure first so they don't feel accused ("No problem — that one
+  didn't match, it happens. Could you try…"). Do not blame the caller.
+- If they sound frustrated, be extra patient and offer the alternative identifier proactively.
+- Keep it to ONE sentence and ONE question mark."""
 
 
 class IdentifierDecision(BaseModel):

@@ -41,7 +41,17 @@ Rules:
   Never bundle multiple questions into one.
 - If it sounds like an emergency (accident, breakdown, danger), immediately return
   action='done' with intent='emergency'. Do not interrogate.
-- If after the conversation you still cannot tell, return action='done' with intent='unknown'."""
+- If after the conversation you still cannot tell, return action='done' with intent='unknown'.
+
+Tone — sound human, not robotic, and ADAPT to how much the caller has shared:
+- If the caller gave a lot of detail, acknowledge it briefly ("Thanks for the detail —")
+  and ask only the one thing still missing.
+- If the caller said very little (e.g. "hi", "I need help"), be warm and welcoming and
+  gently invite them to say more, rather than firing a blunt question.
+- If the caller sounds worried or upset, lead with a short reassurance ("I can help with
+  that —") before the question.
+- Vary your wording; never repeat a question the caller has effectively already answered.
+- Keep it to ONE sentence and ONE question mark."""
 
 ALLOWED_INTENTS = {"policy_question", "offer", "claim", "emergency", "unknown"}
 

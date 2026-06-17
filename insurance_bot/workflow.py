@@ -125,6 +125,41 @@ def _blocked(ctx: Context, text: str, stage: str) -> bool:
     return True
 
 
+def _screen_question(ctx: Context, q: str, stage: str, turn: int) -> str:
+    """Output guardrail for a brain-generated intake question.
+
+    Screens the question the classifier/identifier wants to ask BEFORE it
+    reaches the caller: scrubs any leaked secret/PII, enforces the
+    single-question rule, caps length, and tracks the running question budget.
+    Returns the (possibly cleaned) text that is safe to send.
+    """
+    asked = ctx.state.get("questions_asked", 0) + 1
+    ctx.state["questions_asked"] = asked
+    cap = MAX_CLASSIFIER_TURNS if stage == "clf" else MAX_IDENTIFIER_TURNS
+
+    v = safety.screen_question(q)
+    logger.info(
+        "OUTPUT GUARDRAIL | stage=%s turn=%s questions_asked=%s/%s "
+        "single=%s verdict=%s category=%s",
+        stage, turn, asked, cap, v["single"], v["verdict"], v.get("category"),
+    )
+    if v["verdict"] != "allow":
+        audit.log_action(
+            session_id=ctx.state.get("session_id", "unknown"),
+            customer_id=ctx.state.get("verification", {}).get("customer_id"),
+            action="OUTPUT_GUARDRAIL_QUESTION", intent="intake",
+            risk_level="LOW", status=v["verdict"].upper(),
+            extra={"category": v.get("category"), "reason": v.get("reason"),
+                   "stage": stage, "questions_asked": asked},
+        )
+    # A hard secret block: don't ask the tainted question, fall back to a safe one.
+    if v["verdict"] == "block":
+        return ("Could you tell me a little more so I can point you the right way?"
+                if stage == "clf" else
+                "Could you share your phone number and date of birth?")
+    return v["text"]
+
+
 def _seed_for_identifier(ctx: Context) -> str:
     """Seed line: identifiers the classifier already captured (so we don't re-ask)."""
     ids = ctx.state.get("classification", {}).get("customer_identifiers", {})
@@ -182,6 +217,7 @@ async def intake(ctx: Context, node_input):
             # fall through to PHASE 2 in the same invocation
         else:
             q = decision.get("question") or "Could you tell me a little more about what you need?"
+            q = _screen_question(ctx, q, "clf", turn)
             ctx.state[f"clf_q_{turn}"] = q
             logger.info("CLASSIFIER | pausing to ask (turn=%s): %s", turn, q[:60])
             yield RequestInput(interrupt_id=f"clf_q_{turn}", message=q)
@@ -241,6 +277,7 @@ async def intake(ctx: Context, node_input):
                 break
 
             q = decision.get("question") or "Could you share your phone number and date of birth?"
+            q = _screen_question(ctx, q, "idf", turn)
             ctx.state[f"idf_q_{turn}"] = q
             logger.info("IDENTIFIER | pausing to ask (turn=%s): %s", turn, q[:60])
             yield RequestInput(interrupt_id=f"idf_q_{turn}", message=q)
