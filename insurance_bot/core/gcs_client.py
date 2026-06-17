@@ -133,6 +133,14 @@ class GCSClient:
         data = self._read(f"indexes/customer_claims/{customer_id}.json")
         return data.get("claims", []) if data else []
 
+    def log_sos_interaction(self, record: dict) -> bool:
+        """Persist an emergency (SOS) interaction to the sos_interactions bucket prefix."""
+        sos_id = record.get("sos_id")
+        if not _safe_id(sos_id or ""):
+            logger.error("SOS | refusing to write record with unsafe sos_id=%r", sos_id)
+            return False
+        return self._write(f"sos_interactions/{sos_id}.json", record)
+
     def log_action(self, action: dict) -> str:
         ts = datetime.now().isoformat()
         action["logged_at"] = ts

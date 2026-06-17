@@ -142,6 +142,12 @@ def decide_route(*, verification_level: str, intent: str, allowed_actions: list[
 
     Returns "escalate" or "proceed".
     """
+    # Emergencies are time-critical: never gate an SOS behind identity checks —
+    # always proceed so the caller is routed straight to a human.
+    if intent == "emergency":
+        logger.info("ROUTING | emergency → proceed (SOS bypass)")
+        return "proceed"
+
     if (
         verification_level in ("UNVERIFIED", "ESCALATED")
         or intent == "unknown"

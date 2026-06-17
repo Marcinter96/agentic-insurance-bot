@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 import logging
+from datetime import datetime, timezone
 
 from google.adk import Context
 from google.adk.workflow import Workflow, node, Edge, START
@@ -33,12 +34,12 @@ from google.adk.workflow._function_node import RequestInput
 from insurance_bot.agents.policy_agent import policy_agent
 from insurance_bot.agents.claims_agent import claims_agent
 from insurance_bot.agents.offers_agent import offers_agent
-from insurance_bot.agents.emergency_agent import emergency_agent
 from insurance_bot.agents import classifier_agent, identifier_agent
 from insurance_bot.agents.classifier_agent import build_classification
 from insurance_bot.core import audit_logger as audit
 from insurance_bot.core import guardrails
 from insurance_bot.core import safety
+from insurance_bot.core.gcs_client import gcs
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +237,17 @@ async def intake(ctx: Context, node_input):
             yield RequestInput(interrupt_id=f"clf_q_{turn}", message=q)
             return
 
+    # ===== EMERGENCY BYPASS: never ask a caller in crisis to verify their ID =====
+    if ctx.state.get("classification", {}).get("intent") == "emergency" \
+            and not ctx.state.get("verification"):
+        ids = ctx.state.get("classification", {}).get("customer_identifiers", {})
+        ctx.state["verification"] = {
+            "customer_id": None, "verification_level": "EMERGENCY_BYPASS",
+            "allowed_actions": [], "failure_reason": None,
+            "customer_data": {k: v for k, v in ids.items() if v},
+        }
+        logger.info("INTAKE | emergency → skipping identification (SOS bypass)")
+
     # ===== PHASE 2: identify the caller =====
     if not ctx.state.get("verification"):
         idf_q, idf_r = _collect_turns(ctx, "idf")
@@ -311,6 +323,68 @@ async def intake(ctx: Context, node_input):
 def guardrail_blocked(ctx: Context, node_input=None):
     """Terminal node: emit the fixed safe refusal for a blocked input."""
     ctx.output = ctx.state.get("_refusal") or safety.REFUSAL_INJECTION
+
+
+# ---------------------------------------------------------------------------
+# SOS Handler — emergency routing to a human (no tools, just message + audit)
+# ---------------------------------------------------------------------------
+
+SOS_MESSAGE = (
+    "Your call is important to us. As this is an emergency, I'm routing you straight "
+    "to a human specialist who can support you right away. Your reference number is {sos_id}. "
+    "If anyone is in immediate danger, please call your local emergency number (112) now."
+)
+
+
+def build_sos_record(state: dict, sos_id: str) -> dict:
+    """Build the SOS interaction record from workflow state (pure / testable).
+
+    Captures a unique id, the customer information we have, and the reason for
+    the call (sub-intent, else the caller's first message)."""
+    verification = state.get("verification", {})
+    classification = state.get("classification", {})
+    reason = (classification.get("sub_intent")
+              or state.get("first_message", "")
+              or "Unspecified emergency")
+    return {
+        "sos_id": sos_id,
+        "session_id": state.get("session_id", "unknown"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "customer": {
+            "customer_id": verification.get("customer_id"),
+            "verification_level": verification.get("verification_level"),
+            "details": verification.get("customer_data", {}),
+        },
+        "reason": reason,
+        "intent": classification.get("intent", "emergency"),
+        "status": "ROUTED_TO_HUMAN",
+    }
+
+
+@node(name="sos_handler", rerun_on_resume=True)
+def sos_handler(ctx: Context, node_input=None):
+    """Emergency path: tell the caller a human is taking over and record the SOS.
+
+    No tools — the SOS agent just (1) speaks a fixed reassurance and (2) writes
+    a record to the `sos_interactions` bucket with a unique id, the customer
+    information we have, and the reason for the call.
+    """
+    session_id = ctx.state.get("session_id", "unknown")
+    verification = ctx.state.get("verification", {})
+    sos_id = f"sos_{uuid.uuid4().hex[:10]}"
+    record = build_sos_record(ctx.state, sos_id)
+    reason = record["reason"]
+    written = gcs.log_sos_interaction(record)
+    audit.log_action(
+        session_id=session_id, customer_id=verification.get("customer_id"),
+        action="SOS_INTERACTION", intent="emergency", risk_level="HIGH",
+        status="ROUTED_TO_HUMAN",
+        extra={"sos_id": sos_id, "reason": reason, "persisted": written},
+    )
+    logger.info("SOS | logged interaction sos_id=%s customer=%s persisted=%s reason=%s",
+                sos_id, verification.get("customer_id") or "-", written, reason[:60])
+
+    ctx.output = SOS_MESSAGE.format(sos_id=sos_id)
 
 
 # ---------------------------------------------------------------------------
@@ -473,10 +547,9 @@ root_agent = Workflow(
         Edge(from_node=specialist_router, to_node=policy_agent, route="policy_question"),
         Edge(from_node=specialist_router, to_node=claims_agent, route="claim"),
         Edge(from_node=specialist_router, to_node=offers_agent, route="offer"),
-        Edge(from_node=specialist_router, to_node=emergency_agent, route="emergency"),
+        Edge(from_node=specialist_router, to_node=sos_handler, route="emergency"),
         (policy_agent, action_confirmation),
         (claims_agent, action_confirmation),
         (offers_agent, action_confirmation),
-        (emergency_agent, action_confirmation),
     ],
 )
