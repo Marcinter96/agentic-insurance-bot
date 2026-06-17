@@ -237,6 +237,54 @@ def screen_output(text: str) -> dict:
     return screen_output_rules(text)
 
 
+# A generated intake question should never contain more than one "?", never
+# leak a secret/card number, and never run on for paragraphs. These are the
+# output guardrails for the question-asking brains (classifier / identifier).
+_MAX_QUESTION_CHARS = 320
+
+
+def screen_question(text: str) -> dict:
+    """Output guardrail for a brain-generated question.
+
+    Runs the standard secret/PII scrub, then enforces question-shape rules:
+      • single_question   — at most one '?' (we don't bundle questions)
+      • length            — trimmed if the brain rambled
+    Returns {verdict, category, reason, text(cleaned), question_count, single}.
+    A verdict of 'scrub' means `text` was modified but is safe to send.
+    """
+    base = screen_output_rules(text or "")
+    cleaned = base["text"]
+    category = base["category"]
+    reason = base["reason"]
+    verdict = base["verdict"]
+
+    # A hard secret block wins outright — return the redaction as-is.
+    if verdict == "block":
+        return {**base, "question_count": 0, "single": True}
+
+    question_count = cleaned.count("?")
+    single = question_count <= 1
+
+    # Enforce the single-question rule: keep everything up to and including the
+    # first '?', dropping any piled-on follow-ups.
+    if not single:
+        head = cleaned.split("?", 1)[0].strip()
+        cleaned = (head + "?") if head else cleaned
+        verdict = "scrub" if verdict == "allow" else verdict
+        category = category if category != "ok" else "multi_question"
+        reason = reason or "Trimmed multiple questions to one."
+
+    # Defensive length cap so a runaway generation can't dump a wall of text.
+    if len(cleaned) > _MAX_QUESTION_CHARS:
+        cleaned = cleaned[:_MAX_QUESTION_CHARS].rstrip() + "…"
+        verdict = "scrub" if verdict == "allow" else verdict
+        category = category if category != "ok" else "length"
+        reason = reason or "Trimmed an over-long question."
+
+    return {"verdict": verdict, "category": category, "reason": reason,
+            "text": cleaned, "question_count": question_count, "single": single}
+
+
 def refusal_message(category: str) -> str:
     """Map a block category to a fixed, safe user message."""
     return {

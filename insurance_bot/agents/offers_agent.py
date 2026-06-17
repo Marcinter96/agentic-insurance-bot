@@ -1,5 +1,6 @@
 from google.adk.agents import LlmAgent
 from insurance_bot.core.config import LLM_MODEL
+from insurance_bot.core.output_guard import output_guardrail_callback
 
 
 def list_available_products() -> list[dict]:
@@ -52,6 +53,7 @@ def get_personalized_quote(
 offers_agent = LlmAgent(
     name="offers_agent",
     model=LLM_MODEL,
+    after_model_callback=output_guardrail_callback,
     instruction="""You are an insurance sales and offers specialist. Help customers with:
 - Getting a quote for a new insurance product (auto, home, travel, etc.)
 - Understanding what different coverage options include

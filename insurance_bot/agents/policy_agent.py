@@ -1,6 +1,7 @@
 from google.adk.agents import LlmAgent
 from insurance_bot.core.config import LLM_MODEL
 from insurance_bot.core.gcs_client import gcs
+from insurance_bot.core.output_guard import output_guardrail_callback
 
 
 def get_policy_details(policy_id: str, customer_id: str) -> dict:
@@ -27,6 +28,7 @@ def get_customer_invoices(customer_id: str) -> list[dict]:
 policy_agent = LlmAgent(
     name="policy_agent",
     model=LLM_MODEL,
+    after_model_callback=output_guardrail_callback,
     instruction="""You are an insurance policy specialist. Help the verified customer with:
 - Understanding their coverage (what is and isn't covered)
 - Getting a copy of their policy document

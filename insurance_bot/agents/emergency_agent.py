@@ -1,5 +1,6 @@
 from google.adk.agents import LlmAgent
 from insurance_bot.core.config import LLM_MODEL
+from insurance_bot.core.output_guard import output_guardrail_callback
 
 
 def get_emergency_contacts() -> dict:
@@ -39,6 +40,7 @@ def dispatch_roadside_assistance(
 emergency_agent = LlmAgent(
     name="emergency_agent",
     model=LLM_MODEL,
+    after_model_callback=output_guardrail_callback,
     instruction="""You are an emergency response specialist for an insurance company.
 Your FIRST priority is the customer's safety.
 

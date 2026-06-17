@@ -20,6 +20,39 @@ def _safe_id(value: str) -> str | None:
     return None
 
 
+def _digits(value: str) -> str:
+    """Phone/number → digits only, so formatting (dashes, spaces) doesn't matter."""
+    return re.sub(r"\D", "", value or "")
+
+
+def _alnum(value: str) -> str:
+    """Plate → uppercase alphanumerics only."""
+    return re.sub(r"[^A-Za-z0-9]", "", value or "").upper()
+
+
+def _lookup_normalized(index: dict, raw: str, normalizer) -> str | None:
+    """Match `raw` against an index whose keys are formatted strings.
+
+    Tries an exact hit first, then a format-insensitive match (e.g. a phone
+    typed as '0457 123 456' matches the stored '0457-123-456')."""
+    if not index:
+        logger.warning("LOOKUP | index empty/missing for %r", raw)
+        return None
+    if not raw:
+        return None
+    if raw in index:
+        return index[raw]
+    target = normalizer(raw)
+    if not target:
+        return None
+    for key, cid in index.items():
+        if normalizer(key) == target:
+            return cid
+    logger.info("LOOKUP | no match for %r (normalized=%r) among %d index entries",
+                raw, target, len(index))
+    return None
+
+
 class GCSClient:
     def __init__(self, bucket_name: str = GCS_BUCKET):
         # Lazy: do NOT create storage.Client() here. Importing this module must
@@ -57,9 +90,7 @@ class GCSClient:
 
     def find_customer_by_phone(self, phone: str) -> dict | None:
         index = self._read("indexes/phone_to_customer.json")
-        if not index:
-            return None
-        customer_id = index.get(phone)
+        customer_id = _lookup_normalized(index, phone, _digits)
         return self.get_customer(customer_id) if customer_id else None
 
     def find_customer_by_policy(self, policy_number: str) -> dict | None:
@@ -72,9 +103,7 @@ class GCSClient:
 
     def find_customer_by_plate(self, plate: str) -> dict | None:
         index = self._read("indexes/plate_to_customer.json")
-        if not index:
-            return None
-        customer_id = index.get(plate)
+        customer_id = _lookup_normalized(index, plate, _alnum)
         return self.get_customer(customer_id) if customer_id else None
 
     def get_customer(self, customer_id: str) -> dict | None:
