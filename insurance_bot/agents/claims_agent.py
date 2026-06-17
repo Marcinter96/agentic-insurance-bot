@@ -2,70 +2,52 @@ from google.adk.agents import LlmAgent
 from insurance_bot.core.config import LLM_MODEL
 from insurance_bot.core.gcs_client import gcs
 from insurance_bot.core.output_guard import output_guardrail_callback
-import uuid
-from datetime import datetime
+from insurance_bot.tools.claim_tools import CLAIM_TOOLS
 
 
 def get_open_claims(customer_id: str) -> list[dict]:
-    """List all claims for the verified customer."""
+    """List existing claims for the verified customer."""
     return gcs.get_claims(customer_id)
 
 
 def get_claim_status(claim_id: str, customer_id: str) -> dict:
-    """Get the status of a specific claim. Enforces customer ownership."""
-    claims = gcs.get_claims(customer_id)
-    for claim in claims:
+    """Get the status of a specific existing claim. Enforces customer ownership."""
+    for claim in gcs.get_claims(customer_id):
         if claim.get("claim_id") == claim_id:
             return claim
     return {"error": "Claim not found or not owned by this customer."}
-
-
-def file_new_claim(
-    customer_id: str,
-    policy_id: str,
-    description: str,
-    incident_date: str,
-) -> dict:
-    """File a new insurance claim for the verified customer."""
-    customer = gcs.get_customer(customer_id)
-    if not customer or policy_id not in customer.get("policy_ids", []):
-        return {"error": "Policy not found or not owned by this customer."}
-
-    claim_id = f"clm_{uuid.uuid4().hex[:8]}"
-    claim = {
-        "claim_id": claim_id,
-        "policy_id": policy_id,
-        "customer_id": customer_id,
-        "status": "SUBMITTED",
-        "date_filed": datetime.now().strftime("%Y-%m-%d"),
-        "incident_date": incident_date,
-        "description": description,
-        "amount": None,
-    }
-    gcs._write(f"claims/{claim_id}.json", claim)
-    return {"success": True, "claim_id": claim_id, "status": "SUBMITTED",
-            "message": "Your claim has been submitted. A handler will contact you within 48 hours."}
 
 
 claims_agent = LlmAgent(
     name="claims_agent",
     model=LLM_MODEL,
     after_model_callback=output_guardrail_callback,
-    instruction="""You are an insurance claims specialist. Help the verified customer with:
-- Checking the status of an existing claim
-- Filing a new claim (accident, theft, damage, etc.)
-- Understanding the claims process and next steps
-- Providing the required documentation list
+    instruction="""You are an insurance CLAIMS specialist. Customers filing claims are often
+stressed — be calm, empathetic, and clear.
 
-When filing a new claim, always collect:
-1. The policy number / policy ID
-2. Date of incident
-3. Description of what happened
+You can do two things:
 
-Be empathetic — customers filing claims are often stressed. Be clear about timelines.
+A) CHECK an existing claim — use `get_open_claims` / `get_claim_status`.
 
-GUARDRAIL: You may only access claims belonging to the customer_id in your context.
-Never expose other customers' claim details.
+B) FILE a new claim — this is a guided intake of FIVE questions. Follow this exactly:
+   1. Call `list_claim_questions` so you know the five required questions.
+   2. Ask the questions ONE AT A TIME (incident type → date → location → description →
+      policy number). After EACH answer, call `record_claim_answer(field, value)` to save it.
+   3. Use `get_claim_progress` if you need to see what's still missing.
+   4. When all five are collected (progress shows complete=true), ask the customer WHEN they'd
+      like to be called back. Then call `finalize_claim_with_callback(preferred_callback_time)` —
+      a claims agent will call them back at that time. Give them their claim reference.
+   5. If you CANNOT collect all five (the customer can't or won't answer, or is stuck after a
+      couple of tries), call `route_claim_to_human(reason)` to hand off to a human specialist,
+      and give them the reference.
+
+Rules:
+- One question per turn. Never bundle the five questions together.
+- Save every answer with `record_claim_answer` as you go — don't keep it only in your head.
+- Only call `finalize_claim_with_callback` once the intake is complete; if it returns an error
+  about missing fields, ask for those instead.
+- The customer's ID is already in context — the tools read it for you.
+- Be honest about timelines; never promise a specific claim outcome.
 """,
-    tools=[get_open_claims, get_claim_status, file_new_claim],
+    tools=[get_open_claims, get_claim_status, *CLAIM_TOOLS],
 )
